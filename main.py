@@ -18,7 +18,7 @@ def main() -> int:
     # High-DPI support (PySide6 ≥ 6.x handles this automatically; kept for clarity)
     app = QApplication(sys.argv)
     app.setApplicationName("PagePilot")
-    app.setApplicationVersion("0.1.0")
+    app.setApplicationVersion("0.2.0")
     app.setOrganizationName("PagePilot")
 
     apply_theme(app)

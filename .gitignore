@@ -218,3 +218,35 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ── PagePilot Stage 2 additions ───────────────────────────────────────────────
+
+# Virtual environment
+.venv/
+
+# SQLite conversation databases (contain private user conversations)
+*.db
+*.db-shm
+*.db-wal
+
+# Model files (managed by Ollama, not stored in repo)
+*.gguf
+*.bin
+models/
+
+# Generated documents
+*.docx
+output/
+
+# Temporary / scratch files
+*.tmp
+*.bak
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+
+# OS
+Thumbs.db
+desktop.ini

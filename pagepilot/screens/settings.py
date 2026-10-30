@@ -1,26 +1,50 @@
 """
-PagePilot – Settings screen.
+PagePilot – Settings screen (Stage 2).
 
-Displays application info, model status, offline mode, and storage info.
-All data is static in Stage 1.
+Shows live Ollama/model status, database location, and configuration.
+Status is fetched in a background thread — never faked.
 """
 
 from __future__ import annotations
 
 import platform
 import sys
+from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QScrollArea,
-    QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from pagepilot.config import APP_NAME, APP_VERSION, APP_DESCRIPTION, APP_AUTHOR
-from pagepilot.theme import Colors, Fonts, Spacing
+from pagepilot.ai.ollama_client import OllamaClient, OllamaStatus
+from pagepilot.config import (
+    APP_AUTHOR, APP_DESCRIPTION, APP_NAME, APP_VERSION,
+    DB_PATH, MODEL_NAME, NUM_CTX, OLLAMA_HOST, REQUEST_TIMEOUT,
+)
+from pagepilot.theme import Colors, Fonts, Radius, Spacing
 from pagepilot.ui.components import Badge, Card, Divider, InfoRow, SectionLabel
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Background status worker
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _StatusWorker(QThread):
+    done = Signal(object)   # OllamaStatus
+
+    def __init__(self, client: OllamaClient, parent=None):
+        super().__init__(parent)
+        self._client = client
+
+    def run(self):
+        self.done.emit(self._client.check_status())
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Settings screen
+# ──────────────────────────────────────────────────────────────────────────────
 
 class SettingsScreen(QWidget):
     def __init__(self, parent=None):
@@ -28,10 +52,12 @@ class SettingsScreen(QWidget):
         self.setObjectName("SettingsScreen")
         self.setStyleSheet(f"background-color: {Colors.BG_APP};")
 
+        self._client = OllamaClient(host=OLLAMA_HOST, model=MODEL_NAME)
+        self._status_worker: _StatusWorker | None = None
+
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
         root.addWidget(self._build_header())
 
         scroll = QScrollArea()
@@ -45,13 +71,19 @@ class SettingsScreen(QWidget):
         body_layout.setSpacing(Spacing.LG)
 
         body_layout.addWidget(self._build_app_card())
-        body_layout.addWidget(self._build_status_card())
+        body_layout.addWidget(self._build_ai_card())
+        body_layout.addWidget(self._build_roadmap_card())
         body_layout.addWidget(self._build_storage_card())
         body_layout.addWidget(self._build_system_card())
         body_layout.addStretch()
 
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
+
+        # Kick off initial status check
+        self._refresh_status()
+
+    # ── Header ───────────────────────────────────────────────────────
 
     def _build_header(self) -> QWidget:
         header = QWidget()
@@ -71,11 +103,12 @@ class SettingsScreen(QWidget):
         layout.addWidget(title)
         return header
 
+    # ── Application card ─────────────────────────────────────────────
+
     def _build_app_card(self) -> Card:
         card = Card(title="Application")
         layout = card.body_layout()
 
-        # Branding row
         brand_row = QWidget()
         brand_row.setStyleSheet("background: transparent;")
         br_layout = QHBoxLayout(brand_row)
@@ -96,7 +129,10 @@ class SettingsScreen(QWidget):
         name_lbl.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;")
 
         desc_lbl = QLabel(APP_DESCRIPTION)
-        desc_lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_SM}px; background: transparent; border: none;")
+        desc_lbl.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_SM}px; "
+            f"background: transparent; border: none;"
+        )
 
         info_layout.addWidget(name_lbl)
         info_layout.addWidget(desc_lbl)
@@ -104,101 +140,223 @@ class SettingsScreen(QWidget):
         br_layout.addWidget(logo)
         br_layout.addWidget(info_col, 1)
         br_layout.addWidget(Badge(f"v{APP_VERSION}", "accent"))
-
         layout.addWidget(brand_row)
         layout.addWidget(Divider())
 
-        layout.addWidget(InfoRow("Author", APP_AUTHOR))
+        layout.addWidget(InfoRow("Author",  APP_AUTHOR))
         layout.addWidget(InfoRow("Version", APP_VERSION))
-        layout.addWidget(InfoRow("Stage", "Stage 1 — Windows Frontend (UI only)"))
+        layout.addWidget(InfoRow("Stage",   "Stage 2 — Local AI Chat (Ollama + Qwen2.5:3b)"))
         return card
 
-    def _build_status_card(self) -> Card:
-        card = Card(title="Status")
+    # ── AI / Ollama card ─────────────────────────────────────────────
+
+    def _build_ai_card(self) -> Card:
+        card = Card(title="AI Model & Ollama")
         layout = card.body_layout()
 
-        def status_row(label: str, badge_text: str, variant: str, detail: str = "") -> QWidget:
+        # Status section (dynamic)
+        status_section = QWidget()
+        status_section.setStyleSheet("background: transparent;")
+        self._status_layout = QVBoxLayout(status_section)
+        self._status_layout.setContentsMargins(0, 0, 0, 0)
+        self._status_layout.setSpacing(Spacing.SM)
+
+        self._server_row  = self._make_status_row("Ollama Server", "Checking…", "default")
+        self._model_row   = self._make_status_row("Model", "Checking…",          "default")
+        self._status_layout.addWidget(self._server_row["widget"])
+        self._status_layout.addWidget(self._model_row["widget"])
+
+        layout.addWidget(status_section)
+        layout.addWidget(Divider())
+
+        # Configuration (static)
+        layout.addWidget(InfoRow("Ollama Host",      OLLAMA_HOST))
+        layout.addWidget(InfoRow("Model",            MODEL_NAME))
+        layout.addWidget(InfoRow("Context Window",   f"{NUM_CTX:,} tokens"))
+        layout.addWidget(InfoRow("Request Timeout",  f"{REQUEST_TIMEOUT}s"))
+
+        layout.addWidget(Divider())
+
+        # Action row
+        btn_row = QWidget()
+        btn_row.setStyleSheet("background: transparent;")
+        btn_l = QHBoxLayout(btn_row)
+        btn_l.setContentsMargins(0, 0, 0, 0)
+        btn_l.setSpacing(Spacing.SM)
+
+        self._retry_btn = QPushButton("↺  Retry Connection")
+        self._retry_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._retry_btn.setFixedHeight(34)
+        self._retry_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {Colors.TEXT_PRIMARY}; "
+            f"border: 1px solid {Colors.BORDER}; border-radius: {Radius.MD}px; "
+            f"font-size: {Fonts.SIZE_SM}px; padding: 0 16px; }}"
+            f"QPushButton:hover {{ background: {Colors.BG_ELEVATED}; }}"
+            f"QPushButton:disabled {{ color: {Colors.TEXT_DISABLED}; }}"
+        )
+        self._retry_btn.clicked.connect(self._refresh_status)
+        btn_l.addWidget(self._retry_btn)
+        btn_l.addStretch()
+        layout.addWidget(btn_row)
+
+        # Install instructions
+        self._install_lbl = QLabel()
+        self._install_lbl.setWordWrap(True)
+        self._install_lbl.setStyleSheet(
+            f"color: {Colors.TEXT_DISABLED}; font-size: {Fonts.SIZE_XS}px; "
+            f"background: transparent; border: none;"
+        )
+        self._install_lbl.hide()
+        layout.addWidget(self._install_lbl)
+
+        return card
+
+    def _make_status_row(self, label: str, badge_text: str, variant: str) -> dict:
+        w = QWidget()
+        w.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(Spacing.MD)
+
+        lbl = QLabel(label)
+        lbl.setFixedWidth(160)
+        lbl.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_SM}px; "
+            f"background: transparent; border: none;"
+        )
+
+        badge = Badge(badge_text, variant)
+        h.addWidget(lbl)
+        h.addWidget(badge)
+        h.addStretch()
+        return {"widget": w, "badge": badge}
+
+    def _update_status_badge(self, row: dict, text: str, variant: str):
+        old_badge = row["badge"]
+        new_badge = Badge(text, variant)
+        # Replace in layout
+        layout = row["widget"].layout()
+        idx = layout.indexOf(old_badge)
+        if idx >= 0:
+            layout.removeWidget(old_badge)
+            old_badge.deleteLater()
+            layout.insertWidget(idx, new_badge)
+        row["badge"] = new_badge
+
+    # ── Roadmap card ─────────────────────────────────────────────────
+
+    def _build_roadmap_card(self) -> Card:
+        card = Card(title="Feature Roadmap")
+        layout = card.body_layout()
+
+        def feature_row(label: str, badge_text: str, variant: str, detail: str = "") -> QWidget:
             w = QWidget()
             w.setStyleSheet("background: transparent;")
             h = QHBoxLayout(w)
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(Spacing.MD)
             lbl = QLabel(label)
-            lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_SM}px; background: transparent; border: none; min-width: 160px;")
+            lbl.setFixedWidth(180)
+            lbl.setStyleSheet(
+                f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_SM}px; "
+                f"background: transparent; border: none;"
+            )
             badge = Badge(badge_text, variant)
             h.addWidget(lbl)
             h.addWidget(badge)
             if detail:
                 d = QLabel(detail)
-                d.setStyleSheet(f"color: {Colors.TEXT_DISABLED}; font-size: {Fonts.SIZE_XS}px; background: transparent; border: none;")
+                d.setStyleSheet(
+                    f"color: {Colors.TEXT_DISABLED}; font-size: {Fonts.SIZE_XS}px; "
+                    f"background: transparent; border: none;"
+                )
                 h.addWidget(d)
             h.addStretch()
             return w
 
-        layout.addWidget(status_row(
-            "AI Chat",
-            "Not Implemented",
-            "warning",
-            "Planned — Stage 2"
-        ))
-        layout.addWidget(status_row(
-            "Offline Mode",
-            "No online services configured",
-            "default",
-            "Stage 1"
-        ))
-        layout.addWidget(status_row(
-            "Voice Recognition",
-            "Not Implemented",
-            "default",
-            "Planned — Stage 3"
-        ))
-        layout.addWidget(status_row(
-            "PDF Processing",
-            "Not Implemented",
-            "default",
-            "Planned — Stage 4"
-        ))
-        layout.addWidget(status_row(
-            "DOCX Generation",
-            "Not Implemented",
-            "default",
-            "Planned — Stage 5"
-        ))
-        layout.addWidget(status_row(
-            "Android Application",
-            "Not Implemented",
-            "default",
-            "Planned — Stage 6"
-        ))
-        layout.addWidget(status_row(
-            "Offline Maps",
-            "Not Implemented",
-            "default",
-            "Planned — Stage 7"
-        ))
+        layout.addWidget(feature_row("AI Chat",              "Active",          "success", "Stage 2 — qwen2.5:3b via Ollama"))
+        layout.addWidget(feature_row("Offline Mode",         "No cloud APIs",   "info",    "All inference is local"))
+        layout.addWidget(feature_row("Voice Recognition",    "Not Implemented", "default", "Planned — Stage 3"))
+        layout.addWidget(feature_row("PDF Processing",       "Not Implemented", "default", "Planned — Stage 4"))
+        layout.addWidget(feature_row("DOCX Generation",      "Not Implemented", "default", "Planned — Stage 5"))
+        layout.addWidget(feature_row("Android Application",  "Not Implemented", "default", "Planned — Stage 6"))
+        layout.addWidget(feature_row("Offline Maps",         "Not Implemented", "default", "Planned — Stage 7"))
         return card
+
+    # ── Storage card ─────────────────────────────────────────────────
 
     def _build_storage_card(self) -> Card:
         card = Card(title="Storage")
         layout = card.body_layout()
-        layout.addWidget(InfoRow("User Data", "Not stored — Stage 1 holds no data on disk"))
-        layout.addWidget(InfoRow("Models", "No models loaded"))
-        layout.addWidget(InfoRow("Cache", "None"))
-        layout.addWidget(InfoRow("Map Tiles", "None"))
+
+        db_path = str(DB_PATH)
+        db_exists = DB_PATH.exists()
+        db_size = f"{DB_PATH.stat().st_size / 1024:.1f} KB" if db_exists else "not yet created"
+
+        layout.addWidget(InfoRow("Database",    db_path))
+        layout.addWidget(InfoRow("DB Size",     db_size))
+        layout.addWidget(InfoRow("Models",      "Managed by Ollama (not stored here)"))
+        layout.addWidget(InfoRow("Map Tiles",   "None — Stage 7"))
         return card
+
+    # ── System card ──────────────────────────────────────────────────
 
     def _build_system_card(self) -> Card:
         card = Card(title="System")
         layout = card.body_layout()
         layout.addWidget(InfoRow("Operating System", platform.system() + " " + platform.release()))
-        layout.addWidget(InfoRow("Python", sys.version.split(" ")[0]))
+        layout.addWidget(InfoRow("Python",           sys.version.split(" ")[0]))
         try:
             import PySide6
             pyside_ver = PySide6.__version__
         except Exception:
             pyside_ver = "unknown"
-        layout.addWidget(InfoRow("PySide6", pyside_ver))
+        layout.addWidget(InfoRow("PySide6",      pyside_ver))
         layout.addWidget(InfoRow("Architecture", platform.machine()))
         return card
 
+    # ── Status refresh ───────────────────────────────────────────────
+
+    def _refresh_status(self):
+        if self._status_worker and self._status_worker.isRunning():
+            return
+        self._retry_btn.setEnabled(False)
+        self._retry_btn.setText("Checking…")
+        self._update_status_badge(self._server_row, "Checking…", "default")
+        self._update_status_badge(self._model_row,  "Checking…", "default")
+        self._install_lbl.hide()
+
+        self._status_worker = _StatusWorker(self._client, parent=self)
+        self._status_worker.done.connect(self._on_status_done)
+        self._status_worker.start()
+
+    def _on_status_done(self, status: OllamaStatus):
+        self._retry_btn.setEnabled(True)
+        self._retry_btn.setText("↺  Retry Connection")
+
+        # Server row
+        if status.server_reachable:
+            self._update_status_badge(self._server_row, "Running", "success")
+        else:
+            self._update_status_badge(self._server_row, "Not Running", "error")
+
+        # Model row
+        if status.model_available:
+            self._update_status_badge(self._model_row, "Installed", "success")
+        elif status.server_reachable:
+            self._update_status_badge(self._model_row, "Not Installed", "warning")
+        else:
+            self._update_status_badge(self._model_row, "Unknown", "default")
+
+        # Show install instructions when needed
+        if status.error:
+            self._install_lbl.setText(f"ℹ  {status.error}")
+            self._install_lbl.show()
+        else:
+            self._install_lbl.hide()
+
+    # ── Public API ───────────────────────────────────────────────────
+
+    def refresh(self):
+        """Called by MainWindow when this screen becomes visible."""
+        self._refresh_status()
