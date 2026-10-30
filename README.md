@@ -4,9 +4,16 @@
 
 ---
 
-## Current Status — Stage 4: Offline PDF Intelligence & Hybrid RAG
+## Current Status — Stage 5: Professional DOCX Generation & PDF Intelligence
 
 PagePilot currently supports:
+- **Professional DOCX Engine (Stage 5):**
+  - **Local Document Automation:** Native Microsoft Word (.docx) generation powered by `python-docx` and `lxml`.
+  - **5 Document Types:** PDF Summary, Study Notes, Question & Answer Notes, Project Report, Selected PDF Content, and Custom Documents.
+  - **5 Professional Templates:** Simple Study Notes, Academic Summary, Question and Answer Notes, Project Report, and Custom Document with distinct typography, palettes, margins, and callouts.
+  - **Strict Citation Preservation:** Preserves real PDF filenames, 1-based page numbers, and verified snippets. Supports inline citations, Sources section tables, both, or none.
+  - **Interactive Editor:** Markdown content preview and live editor allowing review and customization prior to export.
+  - **Reliable Validation:** Reopens and verifies generated OpenXML packages before export confirmation.
 - **Offline AI Chat (Stage 2):** Streaming conversations with local `qwen2.5:3b` via Ollama and persistent SQLite history.
 - **Offline Voice Recognition (Stage 3):** High-precision speech-to-text powered by `whisper.cpp` (`pywhispercpp`) using the `ggml-base` multilingual model (or `base.en`). Audio recorded via `sounddevice` at 16 kHz mono.
 - **Offline Speech Synthesis (Stage 3):** Natural local neural text-to-speech powered by Piper (`piper-tts`) with background playback and pause/stop controls.
@@ -35,6 +42,7 @@ PagePilot currently supports:
 | Document Storage | SQLite (`sqlite3`) | `%APPDATA%\PagePilot\documents.db` |
 | Chat Persistence | SQLite (`sqlite3`) | `%APPDATA%\PagePilot\conversations.db` |
 | PDF Extraction | PyMuPDF (`pymupdf`) | Fast streaming extraction, page metadata |
+| DOCX Generation | `python-docx` + `lxml` | OpenXML document assembly & validation |
 | Audio Capture | `sounddevice` + PortAudio | 16 kHz mono 16-bit PCM |
 | Speech Recognition | `whisper.cpp` (`pywhispercpp`) | `ggml-base.bin` multilingual model (~148 MB) |
 | Speech Synthesis | Piper (`piper-tts`) | `en_US-lessac-medium` neural ONNX voice |
@@ -78,6 +86,7 @@ All user data and models remain strictly on your local machine outside the Git r
 * **Chat Database:** `%APPDATA%\PagePilot\conversations.db`
 * **Documents Database:** `%APPDATA%\PagePilot\documents.db`
 * **Chroma Vector Store:** `%APPDATA%\PagePilot\vectordb\`
+* **DOCX Exports:** `%USERPROFILE%\Documents\PagePilot\`
 * **Whisper Models:** `%APPDATA%\PagePilot\models\whisper\`
 * **Piper Voices:** `%APPDATA%\PagePilot\models\piper\`
 

@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "PagePilot"
-APP_VERSION = "0.4.0-stage4"
+APP_VERSION = "0.5.0-stage5"
 APP_DESCRIPTION = "Offline-first AI assistant"
 APP_AUTHOR = "PagePilot Team"
 
@@ -93,6 +93,16 @@ CHROMA_DIR           = _APP_DATA_DIR / "vectordb"
 def ensure_chroma_dir() -> Path:
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     return CHROMA_DIR
+
+# ──────────────────────────────────────────────
+# DOCX Generation / Stage 5 configuration
+# ──────────────────────────────────────────────
+DOCX_OUTPUT_DIR = Path.home() / "Documents" / "PagePilot"
+
+def ensure_docx_dir() -> Path:
+    """Create the PagePilot documents output directory if it does not exist."""
+    DOCX_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    return DOCX_OUTPUT_DIR
 
 # ──────────────────────────────────────────────
 # Navigation item IDs  (used as page keys in stacked widget)

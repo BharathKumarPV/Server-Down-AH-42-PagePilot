@@ -102,3 +102,23 @@ Piper voice models (`.onnx` and `.onnx.json`) are developed independently and ho
 * **Model:** `nomic-embed-text` by Nomic AI
 * **License:** **Apache License 2.0**
 * **Weights:** 768-dimensional open-weights embedding model optimized for long context (8192 tokens). Used strictly offline via Ollama.
+
+---
+
+## 9. python-docx (Stage 5)
+
+* **Project:** [python-openxml/python-docx](https://github.com/python-openxml/python-docx)
+* **License:** **MIT License**
+* **Copyright:** © 2013 Steve Canny and contributors
+* **Usage in PagePilot:** Generates native Microsoft Word (.docx) documents from structured Markdown, headings, tables, callout blocks, and verified PDF citations.
+* Permissive MIT license allows commercial use, modification, distribution, and private use, provided that the copyright and permission notice are preserved.
+
+---
+
+## 10. lxml (Stage 5)
+
+* **Project:** [lxml/lxml](https://github.com/lxml/lxml)
+* **License:** **BSD-3-Clause** (with elements under ZPL 2.0 and GPL)
+* **Copyright:** © 2004 Stefan Behnel, Martijn Faassen and contributors
+* **Usage in PagePilot:** High-performance XML processing underlying python-docx for OpenXML document manipulation.
+* Permissive BSD license allows distribution and use in source and binary forms with copyright notice retention.

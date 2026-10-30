@@ -23,7 +23,7 @@ from pagepilot.config import (
     APP_AUTHOR, APP_DESCRIPTION, APP_NAME, APP_VERSION,
     DB_PATH, DOCS_DB_PATH, CHROMA_DIR, EMBED_MODEL,
     MODEL_NAME, NUM_CTX, OLLAMA_HOST, REQUEST_TIMEOUT,
-    WHISPER_MODEL_DIR, PIPER_VOICE_DIR,
+    WHISPER_MODEL_DIR, PIPER_VOICE_DIR, DOCX_OUTPUT_DIR,
 )
 from pagepilot.theme import Colors, Fonts, Radius, Spacing
 from pagepilot.ui.components import Badge, Card, Divider, InfoRow, SectionLabel
@@ -150,7 +150,7 @@ class SettingsScreen(QWidget):
 
         layout.addWidget(InfoRow("Author",  APP_AUTHOR))
         layout.addWidget(InfoRow("Version", APP_VERSION))
-        layout.addWidget(InfoRow("Stage",   "Stage 4 — Offline PDF Intelligence, Voice & AI Chat"))
+        layout.addWidget(InfoRow("Stage",   "Stage 5 — Professional DOCX Generation, PDF Intelligence, Voice & AI Chat"))
         return card
 
     # ── AI / Ollama card ─────────────────────────────────────────────
@@ -297,7 +297,7 @@ class SettingsScreen(QWidget):
         layout.addWidget(feature_row("Offline Mode",         "No cloud APIs",   "info",    "All inference is local"))
         layout.addWidget(feature_row("Voice Recognition",    "Active",          "success", "Stage 3 — Whisper.cpp + Piper TTS"))
         layout.addWidget(feature_row("PDF Processing",       "Active",          "success", "Stage 4 — PyMuPDF + ChromaDB + nomic-embed-text"))
-        layout.addWidget(feature_row("DOCX Generation",      "Not Implemented", "default", "Planned — Stage 5"))
+        layout.addWidget(feature_row("DOCX Generation",      "Active",          "success", "Stage 5 — python-docx + 5 templates + citations"))
         layout.addWidget(feature_row("Android Application",  "Not Implemented", "default", "Planned — Stage 6"))
         layout.addWidget(feature_row("Offline Maps",         "Not Implemented", "default", "Planned — Stage 7"))
         return card
@@ -320,6 +320,7 @@ class SettingsScreen(QWidget):
         layout.addWidget(InfoRow("Documents DB",      str(DOCS_DB_PATH)))
         layout.addWidget(InfoRow("Documents DB Size", docs_db_size))
         layout.addWidget(InfoRow("Vector Store",      str(CHROMA_DIR)))
+        layout.addWidget(InfoRow("DOCX Output",       str(DOCX_OUTPUT_DIR)))
         layout.addWidget(InfoRow("Whisper Models",    str(WHISPER_MODEL_DIR)))
         layout.addWidget(InfoRow("Piper Voices",      str(PIPER_VOICE_DIR)))
         layout.addWidget(InfoRow("Ollama Models",     "Managed by Ollama runtime"))

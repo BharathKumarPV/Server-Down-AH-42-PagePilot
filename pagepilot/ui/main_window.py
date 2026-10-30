@@ -93,6 +93,8 @@ class MainWindow(QMainWindow):
             self._settings_screen.refresh()
         elif nav_id == NAV_CHAT:
             self._chat_screen.refresh_status()
+        elif nav_id == NAV_DOCX:
+            self._docx_screen.refresh_documents()
 
     def _open_conversation_from_history(self, conv_id: int):
         """Switch to the Chat screen and load the selected conversation."""
