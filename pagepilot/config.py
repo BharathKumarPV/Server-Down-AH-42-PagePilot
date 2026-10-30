@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "PagePilot"
-APP_VERSION = "0.2.0-stage2"
+APP_VERSION = "0.3.0-stage3"
 APP_DESCRIPTION = "Offline-first AI assistant"
 APP_AUTHOR = "PagePilot Team"
 
@@ -51,6 +51,33 @@ def ensure_data_dir() -> Path:
     """Create the application data directory if it does not exist."""
     _APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
     return _APP_DATA_DIR
+
+# ──────────────────────────────────────────────
+# Voice / Stage 3 configuration
+# ──────────────────────────────────────────────
+
+# Whisper speech recognition
+WHISPER_MODEL     = os.environ.get("PAGEPILOT_WHISPER_MODEL", "base")
+WHISPER_LANGUAGE  = os.environ.get("PAGEPILOT_WHISPER_LANG", "auto")
+WHISPER_THREADS   = int(os.environ.get("PAGEPILOT_WHISPER_THREADS", "4"))
+
+_WHISPER_MODEL_DIR = _APP_DATA_DIR / "models" / "whisper"
+WHISPER_MODEL_DIR  = _WHISPER_MODEL_DIR
+
+def ensure_whisper_dir() -> Path:
+    _WHISPER_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    return _WHISPER_MODEL_DIR
+
+# Piper TTS
+PIPER_VOICE        = os.environ.get("PAGEPILOT_PIPER_VOICE", "en_US-lessac-medium")
+PIPER_AUTO_SPEAK   = os.environ.get("PAGEPILOT_AUTO_SPEAK", "0") == "1"
+
+_PIPER_VOICE_DIR   = _APP_DATA_DIR / "models" / "piper"
+PIPER_VOICE_DIR    = _PIPER_VOICE_DIR
+
+def ensure_piper_dir() -> Path:
+    _PIPER_VOICE_DIR.mkdir(parents=True, exist_ok=True)
+    return _PIPER_VOICE_DIR
 
 # ──────────────────────────────────────────────
 # Navigation item IDs  (used as page keys in stacked widget)

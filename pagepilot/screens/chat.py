@@ -14,6 +14,7 @@ ChatGPT-inspired layout:
 
 from __future__ import annotations
 
+import os
 import re
 import textwrap
 from datetime import datetime
@@ -31,10 +32,14 @@ from pagepilot.ai.worker import InferenceWorker
 from pagepilot.config import (
     MODEL_NAME, NUM_CTX, OLLAMA_HOST, REQUEST_TIMEOUT,
     SYSTEM_PROMPT, MAX_HISTORY_MESSAGES,
+    WHISPER_MODEL, WHISPER_LANGUAGE, PIPER_VOICE, PIPER_AUTO_SPEAK,
 )
 from pagepilot.db.database import ConversationDB, Message
 from pagepilot.theme import Colors, Fonts, Radius, Spacing
 from pagepilot.ui.components import IconButton, PlannedBanner
+from pagepilot.voice.recorder import RecorderThread
+from pagepilot.voice.whisper import TranscriptionThread, is_model_installed as is_whisper_installed
+from pagepilot.voice.tts import TtsThread, is_voice_installed
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -143,6 +148,27 @@ def _md_to_html(text: str) -> str:
     )
 
 
+def _clean_markdown_for_speech(text: str) -> str:
+    """Strip markdown formatting, code blocks, etc. for natural speech synthesis."""
+    # Remove code blocks
+    text = re.sub(r"```[\s\S]*?```", " [code block omitted] ", text)
+    # Remove inline code
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    # Remove headings
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    # Remove bold/italic
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    # Remove links [text](url) -> text
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # Remove bullet/list markers
+    text = re.sub(r"^[\*\-\+]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\d+\.\s+", "", text, flags=re.MULTILINE)
+    # Collapse multiple spaces/newlines
+    text = re.sub(r"\n+", " ", text)
+    return text.strip()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Message bubble widget
 # ──────────────────────────────────────────────────────────────────────────────
@@ -151,11 +177,13 @@ class MessageWidget(QFrame):
     """
     A single chat message — user (right-aligned, tinted) or assistant (left, neutral).
     Assistant messages render Markdown via QTextBrowser.
-    Provides Copy and Regenerate actions.
+    Provides Copy, Regenerate, and Read Aloud (Stage 3) actions.
     """
 
     copy_requested       = Signal(str)          # full message text
     regenerate_requested = Signal()             # ask parent to regenerate this turn
+    speak_requested      = Signal(str)          # Stage 3: read aloud
+    stop_speak_requested = Signal()             # Stage 3: stop speech
 
     def __init__(
         self,
@@ -295,15 +323,48 @@ class MessageWidget(QFrame):
 
         copy_btn  = _small_btn("⎘ Copy",       "Copy response to clipboard")
         regen_btn = _small_btn("↺ Regenerate", "Regenerate this response")
+        speak_btn = _small_btn("🔊 Read Aloud", "Read this response aloud")
 
         copy_btn.clicked.connect(self._on_copy)
         regen_btn.clicked.connect(self.regenerate_requested)
+        speak_btn.clicked.connect(self._on_speak_toggle)
 
         self._regen_btn = regen_btn
+        self._speak_btn = speak_btn
+        self._is_speaking = False
+
         h.addWidget(copy_btn)
         h.addWidget(regen_btn)
+        h.addWidget(speak_btn)
         h.addStretch()
         return bar
+
+    def _on_speak_toggle(self):
+        if self._is_speaking:
+            self.stop_speak_requested.emit()
+        else:
+            self.speak_requested.emit(self._content)
+
+    def set_speaking(self, speaking: bool):
+        self._is_speaking = speaking
+        if hasattr(self, "_speak_btn"):
+            if speaking:
+                self._speak_btn.setText("⏹ Stop Speaking")
+                self._speak_btn.setToolTip("Stop speech playback")
+                self._speak_btn.setStyleSheet(
+                    f"QPushButton {{ background: {Colors.BG_ELEVATED}; color: {Colors.ERROR}; "
+                    f"font-size: {Fonts.SIZE_XS}px; border: none; padding: 2px 6px; border-radius: 4px; font-weight: 600; }}"
+                    f"QPushButton:hover {{ background: #3d2525; color: #ff8888; }}"
+                )
+            else:
+                self._speak_btn.setText("🔊 Read Aloud")
+                self._speak_btn.setToolTip("Read this response aloud")
+                self._speak_btn.setStyleSheet(
+                    f"QPushButton {{ background: transparent; color: {Colors.TEXT_DISABLED}; "
+                    f"font-size: {Fonts.SIZE_XS}px; border: none; padding: 2px 6px; border-radius: 4px; }}"
+                    f"QPushButton:hover {{ color: {Colors.TEXT_PRIMARY}; "
+                    f"background: {Colors.BG_ELEVATED}; }}"
+                )
 
     def _adjust_browser_height(self):
         doc_height = int(self._browser.document().size().height()) + 4
@@ -329,6 +390,8 @@ class MessageWidget(QFrame):
         self._streaming = streaming
         if hasattr(self, "_regen_btn"):
             self._regen_btn.setEnabled(not streaming)
+        if hasattr(self, "_speak_btn"):
+            self._speak_btn.setEnabled(not streaming)
 
     def get_content(self) -> str:
         return self._content
@@ -351,7 +414,9 @@ class MessageWidget(QFrame):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class ConversationArea(QScrollArea):
-    regenerate_requested = Signal(int)   # index of message pair to regenerate
+    regenerate_requested = Signal(int)           # index of message pair to regenerate
+    speak_requested      = Signal(object, str)   # (MessageWidget, text)
+    stop_speak_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -374,6 +439,8 @@ class ConversationArea(QScrollArea):
         if role == "assistant":
             idx = len(self._widgets)
             w.regenerate_requested.connect(lambda i=idx: self.regenerate_requested.emit(i))
+            w.speak_requested.connect(lambda text, widget=w: self.speak_requested.emit(widget, text))
+            w.stop_speak_requested.connect(self.stop_speak_requested)
         self._layout.insertWidget(self._layout.count() - 1, w)
         self._widgets.append(w)
         QTimer.singleShot(10, self._scroll_to_bottom)
@@ -449,10 +516,13 @@ class _ComposerInput(QTextEdit):
 
 
 class Composer(QFrame):
-    """Rounded bottom composer bar."""
+    """Rounded bottom composer bar with Stage 3 voice input controls."""
 
-    send_requested = Signal(str)
-    stop_requested = Signal()
+    send_requested          = Signal(str)
+    stop_requested          = Signal()
+    record_start_requested  = Signal()
+    record_stop_requested   = Signal()
+    record_cancel_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -461,6 +531,8 @@ class Composer(QFrame):
             f"QFrame#Composer {{ background: {Colors.BG_SURFACE}; "
             f"border: 1px solid {Colors.BORDER}; border-radius: {Radius.XL}px; }}"
         )
+        self._is_recording = False
+        self._is_processing_voice = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(Spacing.LG, 4, Spacing.MD, 4)
@@ -478,15 +550,42 @@ class Composer(QFrame):
         tb_l.setSpacing(Spacing.SM)
 
         # Planned attachment btn
-        attach_btn = self._icon_btn("📎", "Attachments — planned in a future stage")
+        attach_btn = self._icon_btn("📎", "Attachments — planned in Stage 4")
         attach_btn.setEnabled(False)
 
-        # Planned mic btn
-        mic_btn = self._icon_btn("🎙", "Voice input — planned in Stage 3")
-        mic_btn.setEnabled(False)
+        # Microphone button (Stage 3)
+        self._mic_btn = QPushButton("🎙")
+        self._mic_btn.setFixedSize(30, 30)
+        self._mic_btn.setToolTip("Record voice input (Whisper)")
+        self._mic_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._mic_btn.setStyleSheet(self._default_mic_style())
+        self._mic_btn.clicked.connect(self._on_mic_clicked)
+
+        # Cancel recording button (hidden until recording)
+        self._cancel_rec_btn = QPushButton("✕ Cancel")
+        self._cancel_rec_btn.setFixedHeight(26)
+        self._cancel_rec_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._cancel_rec_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {Colors.TEXT_DISABLED}; "
+            f"font-size: {Fonts.SIZE_XS}px; border: 1px solid {Colors.BORDER}; "
+            f"border-radius: {Radius.SM}px; padding: 2px 8px; }}"
+            f"QPushButton:hover {{ color: {Colors.ERROR}; border-color: {Colors.ERROR}; background: {Colors.BG_ELEVATED}; }}"
+        )
+        self._cancel_rec_btn.clicked.connect(self.record_cancel_requested)
+        self._cancel_rec_btn.hide()
+
+        # Status label during recording or processing
+        self._voice_status_lbl = QLabel("")
+        self._voice_status_lbl.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {Fonts.SIZE_XS}px; "
+            f"background: transparent; border: none;"
+        )
+        self._voice_status_lbl.hide()
 
         tb_l.addWidget(attach_btn)
-        tb_l.addWidget(mic_btn)
+        tb_l.addWidget(self._mic_btn)
+        tb_l.addWidget(self._cancel_rec_btn)
+        tb_l.addWidget(self._voice_status_lbl)
         tb_l.addStretch()
 
         self._send_btn = self._send_button()
@@ -496,6 +595,84 @@ class Composer(QFrame):
         tb_l.addWidget(self._stop_btn)
         tb_l.addWidget(self._send_btn)
         outer.addWidget(toolbar)
+
+    def _default_mic_style(self) -> str:
+        return (
+            f"QPushButton {{ background: transparent; color: {Colors.TEXT_SECONDARY}; "
+            f"font-size: 15px; border: none; border-radius: 15px; }}"
+            f"QPushButton:hover {{ background: {Colors.BG_ELEVATED}; color: {Colors.TEXT_PRIMARY}; }}"
+            f"QPushButton:disabled {{ color: {Colors.BG_ELEVATED}; }}"
+        )
+
+    def _on_mic_clicked(self):
+        if self._is_recording:
+            self.record_stop_requested.emit()
+        else:
+            self.record_start_requested.emit()
+
+    def set_recording_state(self, state: str, detail: str = ""):
+        """state: 'idle' | 'recording' | 'processing' | 'error'"""
+        if state == "recording":
+            self._is_recording = True
+            self._is_processing_voice = False
+            self._mic_btn.setEnabled(True)
+            self._mic_btn.setText("⏹")
+            self._mic_btn.setToolTip("Stop recording and transcribe")
+            self._mic_btn.setStyleSheet(
+                f"QPushButton {{ background: {Colors.ERROR}; color: white; "
+                f"font-size: 14px; border: none; border-radius: 15px; }}"
+                f"QPushButton:hover {{ background: #C04040; }}"
+            )
+            self._cancel_rec_btn.show()
+            self._voice_status_lbl.setText("🔴 Recording speech… click ⏹ to finish")
+            self._voice_status_lbl.show()
+        elif state == "processing":
+            self._is_recording = False
+            self._is_processing_voice = True
+            self._mic_btn.setEnabled(False)
+            self._mic_btn.setText("⏳")
+            self._mic_btn.setToolTip("Transcribing audio with Whisper…")
+            self._mic_btn.setStyleSheet(
+                f"QPushButton {{ background: {Colors.BG_ELEVATED}; color: {Colors.TEXT_PRIMARY}; "
+                f"font-size: 14px; border: none; border-radius: 15px; }}"
+            )
+            self._cancel_rec_btn.hide()
+            self._voice_status_lbl.setText("Transcribing with Whisper…")
+            self._voice_status_lbl.show()
+        elif state == "error":
+            self._is_recording = False
+            self._is_processing_voice = False
+            self._mic_btn.setEnabled(True)
+            self._mic_btn.setText("🎙")
+            self._mic_btn.setToolTip("Record voice input (Whisper)")
+            self._mic_btn.setStyleSheet(self._default_mic_style())
+            self._cancel_rec_btn.hide()
+            self._voice_status_lbl.setText(f"⚠ {detail}" if detail else "⚠ Voice error")
+            self._voice_status_lbl.show()
+        else:  # idle
+            self._is_recording = False
+            self._is_processing_voice = False
+            self._mic_btn.setEnabled(True)
+            self._mic_btn.setText("🎙")
+            self._mic_btn.setToolTip("Record voice input (Whisper)")
+            self._mic_btn.setStyleSheet(self._default_mic_style())
+            self._cancel_rec_btn.hide()
+            self._voice_status_lbl.hide()
+
+    def insert_text(self, text: str):
+        """Append transcribed text into composer input for review and editing."""
+        cur = self._input.toPlainText()
+        if cur and not cur.endswith(" "):
+            new_text = cur + " " + text
+        elif cur:
+            new_text = cur + text
+        else:
+            new_text = text
+        self._input.setPlainText(new_text)
+        cursor = self._input.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._input.setTextCursor(cursor)
+        self._input.setFocus()
 
     def _icon_btn(self, emoji: str, tooltip: str) -> QPushButton:
         btn = QPushButton(emoji)
@@ -548,6 +725,8 @@ class Composer(QFrame):
         self._send_btn.setVisible(not generating)
         self._stop_btn.setVisible(generating)
         self._input.setReadOnly(generating)
+        if hasattr(self, "_mic_btn"):
+            self._mic_btn.setEnabled(not generating)
 
     def clear(self):
         self._input.clear()
@@ -769,6 +948,10 @@ class ChatScreen(QWidget):
         self._db      = ConversationDB()
         self._worker: InferenceWorker | None = None
         self._status_worker: _StatusWorker | None = None
+        self._recorder: RecorderThread | None = None
+        self._transcriber: TranscriptionThread | None = None
+        self._tts_thread: TtsThread | None = None
+        self._speaking_widget: MessageWidget | None = None
         self._current_conv_id: int | None = None
         self._current_stream_widget: MessageWidget | None = None
         self._pending_msg_id: int | None = None
@@ -872,6 +1055,8 @@ class ChatScreen(QWidget):
 
         self._convo = ConversationArea()
         self._convo.regenerate_requested.connect(self._on_regenerate)
+        self._convo.speak_requested.connect(self._on_speak_requested)
+        self._convo.stop_speak_requested.connect(self._stop_tts)
         self._convo.hide()
 
         content_holder = QWidget()
@@ -894,6 +1079,9 @@ class ChatScreen(QWidget):
         self._composer = Composer()
         self._composer.send_requested.connect(self._on_send)
         self._composer.stop_requested.connect(self._on_stop)
+        self._composer.record_start_requested.connect(self._on_record_start)
+        self._composer.record_stop_requested.connect(self._on_record_stop)
+        self._composer.record_cancel_requested.connect(self._on_record_cancel)
         cw_l.addWidget(self._composer)
 
         note = QLabel(
@@ -1017,6 +1205,7 @@ class ChatScreen(QWidget):
 
     def _on_new_chat(self):
         """Clear the view; actual DB record created on first message."""
+        self._stop_tts()
         self._current_conv_id = None
         self._convo.clear()
         self._convo.hide()
@@ -1031,6 +1220,7 @@ class ChatScreen(QWidget):
         if self._worker and self._worker.isRunning():
             return   # don't switch mid-generation
 
+        self._stop_tts()
         self._current_conv_id = conv_id
         self._highlight_conv(conv_id)
 
@@ -1087,6 +1277,8 @@ class ChatScreen(QWidget):
             return
         if self._worker and self._worker.isRunning():
             return
+
+        self._stop_tts()
 
         # Create DB conversation on first message
         if self._current_conv_id is None:
@@ -1154,6 +1346,8 @@ class ChatScreen(QWidget):
     def _on_generation_done(self, full_text: str):
         if self._current_stream_widget:
             self._current_stream_widget.set_streaming(False)
+            if PIPER_AUTO_SPEAK:
+                self._on_speak_requested(self._current_stream_widget, full_text)
         if self._pending_msg_id is not None:
             self._db.update_message(self._pending_msg_id, full_text, "complete")
         self._reset_generation_state()
@@ -1216,6 +1410,124 @@ class ChatScreen(QWidget):
     def _show_error(self, message: str):
         w = self._convo.add_message("assistant", "")
         w.set_error(message)
+
+    # ──────────────────────────────────────────────────────────────
+    # Slots — voice recording & transcription (Stage 3)
+    # ──────────────────────────────────────────────────────────────
+
+    def _on_record_start(self):
+        self._stop_tts()
+        if not is_whisper_installed(WHISPER_MODEL):
+            self._composer.set_recording_state(
+                "error", f"Whisper model 'ggml-{WHISPER_MODEL}' not found. Download in Settings."
+            )
+            QTimer.singleShot(4000, lambda: self._composer.set_recording_state("idle"))
+            return
+
+        self._recorder = RecorderThread(parent=self)
+        self._recorder.state_changed.connect(self._on_recorder_state)
+        self._recorder.finished_path.connect(self._on_recorder_path)
+        self._recorder.error_occurred.connect(self._on_recorder_error)
+        self._recorder.start()
+        self._composer.set_recording_state("recording")
+
+    def _on_record_stop(self):
+        if self._recorder and self._recorder.isRunning():
+            self._recorder.stop()
+            self._composer.set_recording_state("processing")
+
+    def _on_record_cancel(self):
+        if self._recorder and self._recorder.isRunning():
+            self._recorder.cancel()
+        self._composer.set_recording_state("idle")
+
+    def _on_recorder_state(self, state: str):
+        if state == "cancelled":
+            self._composer.set_recording_state("idle")
+
+    def _on_recorder_error(self, err: str):
+        self._composer.set_recording_state("error", err)
+        QTimer.singleShot(4000, lambda: self._composer.set_recording_state("idle"))
+
+    def _on_recorder_path(self, wav_path: str):
+        self._composer.set_recording_state("processing")
+        self._transcriber = TranscriptionThread(
+            wav_path=wav_path,
+            model_name=WHISPER_MODEL,
+            language=WHISPER_LANGUAGE,
+            parent=self,
+        )
+        self._transcriber.transcription_done.connect(
+            lambda text, path=wav_path: self._on_transcription_done(text, path)
+        )
+        self._transcriber.error_occurred.connect(
+            lambda err, path=wav_path: self._on_transcription_error(err, path)
+        )
+        self._transcriber.start()
+
+    def _on_transcription_done(self, text: str, wav_path: str):
+        try:
+            if os.path.exists(wav_path):
+                os.unlink(wav_path)
+        except Exception:
+            pass
+        self._composer.set_recording_state("idle")
+        if text:
+            self._composer.insert_text(text)
+
+    def _on_transcription_error(self, err: str, wav_path: str):
+        try:
+            if os.path.exists(wav_path):
+                os.unlink(wav_path)
+        except Exception:
+            pass
+        self._composer.set_recording_state("error", err)
+        QTimer.singleShot(4000, lambda: self._composer.set_recording_state("idle"))
+
+    # ──────────────────────────────────────────────────────────────
+    # Slots — text-to-speech (Stage 3)
+    # ──────────────────────────────────────────────────────────────
+
+    def _on_speak_requested(self, widget: MessageWidget, text: str):
+        self._stop_tts()
+        if not is_voice_installed(PIPER_VOICE):
+            self._show_error(
+                f"Piper voice '{PIPER_VOICE}' is not installed.\n"
+                f"Open Settings → Voice to install voice models."
+            )
+            return
+
+        clean = _clean_markdown_for_speech(text)
+        if not clean:
+            return
+
+        self._speaking_widget = widget
+        self._tts_thread = TtsThread(clean, voice_name=PIPER_VOICE, parent=self)
+        self._tts_thread.state_changed.connect(self._on_tts_state)
+        self._tts_thread.error_occurred.connect(self._on_tts_error)
+        self._tts_thread.start()
+
+    def _stop_tts(self):
+        if self._tts_thread and self._tts_thread.isRunning():
+            self._tts_thread.stop()
+            self._tts_thread.wait(300)
+        if self._speaking_widget:
+            self._speaking_widget.set_speaking(False)
+            self._speaking_widget = None
+        self._tts_thread = None
+
+    def _on_tts_state(self, state: str):
+        if state == "playing" and self._speaking_widget:
+            self._speaking_widget.set_speaking(True)
+        elif state in ("done", "stopped", "error"):
+            if self._speaking_widget:
+                self._speaking_widget.set_speaking(False)
+                self._speaking_widget = None
+            self._tts_thread = None
+
+    def _on_tts_error(self, err: str):
+        self._stop_tts()
+        self._show_error(f"Speech playback error: {err}")
 
     # ──────────────────────────────────────────────────────────────
     # Public API (called by MainWindow / Sidebar)

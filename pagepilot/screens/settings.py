@@ -22,9 +22,11 @@ from pagepilot.ai.ollama_client import OllamaClient, OllamaStatus
 from pagepilot.config import (
     APP_AUTHOR, APP_DESCRIPTION, APP_NAME, APP_VERSION,
     DB_PATH, MODEL_NAME, NUM_CTX, OLLAMA_HOST, REQUEST_TIMEOUT,
+    WHISPER_MODEL_DIR, PIPER_VOICE_DIR,
 )
 from pagepilot.theme import Colors, Fonts, Radius, Spacing
 from pagepilot.ui.components import Badge, Card, Divider, InfoRow, SectionLabel
+from pagepilot.voice.settings_widget import VoiceSettingsCard
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -72,6 +74,7 @@ class SettingsScreen(QWidget):
 
         body_layout.addWidget(self._build_app_card())
         body_layout.addWidget(self._build_ai_card())
+        body_layout.addWidget(VoiceSettingsCard())
         body_layout.addWidget(self._build_roadmap_card())
         body_layout.addWidget(self._build_storage_card())
         body_layout.addWidget(self._build_system_card())
@@ -145,7 +148,7 @@ class SettingsScreen(QWidget):
 
         layout.addWidget(InfoRow("Author",  APP_AUTHOR))
         layout.addWidget(InfoRow("Version", APP_VERSION))
-        layout.addWidget(InfoRow("Stage",   "Stage 2 — Local AI Chat (Ollama + Qwen2.5:3b)"))
+        layout.addWidget(InfoRow("Stage",   "Stage 3 — Offline Voice (Whisper + Piper) & AI Chat"))
         return card
 
     # ── AI / Ollama card ─────────────────────────────────────────────
@@ -276,7 +279,7 @@ class SettingsScreen(QWidget):
 
         layout.addWidget(feature_row("AI Chat",              "Active",          "success", "Stage 2 — qwen2.5:3b via Ollama"))
         layout.addWidget(feature_row("Offline Mode",         "No cloud APIs",   "info",    "All inference is local"))
-        layout.addWidget(feature_row("Voice Recognition",    "Not Implemented", "default", "Planned — Stage 3"))
+        layout.addWidget(feature_row("Voice Recognition",    "Active",          "success", "Stage 3 — Whisper.cpp + Piper TTS"))
         layout.addWidget(feature_row("PDF Processing",       "Not Implemented", "default", "Planned — Stage 4"))
         layout.addWidget(feature_row("DOCX Generation",      "Not Implemented", "default", "Planned — Stage 5"))
         layout.addWidget(feature_row("Android Application",  "Not Implemented", "default", "Planned — Stage 6"))
@@ -293,10 +296,12 @@ class SettingsScreen(QWidget):
         db_exists = DB_PATH.exists()
         db_size = f"{DB_PATH.stat().st_size / 1024:.1f} KB" if db_exists else "not yet created"
 
-        layout.addWidget(InfoRow("Database",    db_path))
-        layout.addWidget(InfoRow("DB Size",     db_size))
-        layout.addWidget(InfoRow("Models",      "Managed by Ollama (not stored here)"))
-        layout.addWidget(InfoRow("Map Tiles",   "None — Stage 7"))
+        layout.addWidget(InfoRow("Database",       db_path))
+        layout.addWidget(InfoRow("DB Size",        db_size))
+        layout.addWidget(InfoRow("Whisper Models", str(WHISPER_MODEL_DIR)))
+        layout.addWidget(InfoRow("Piper Voices",   str(PIPER_VOICE_DIR)))
+        layout.addWidget(InfoRow("Ollama Models",  "Managed by Ollama runtime"))
+        layout.addWidget(InfoRow("Map Tiles",      "None — Stage 7"))
         return card
 
     # ── System card ──────────────────────────────────────────────────
