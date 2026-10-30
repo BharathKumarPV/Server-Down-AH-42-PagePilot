@@ -16,11 +16,24 @@ from typing import Callable, Generator, List, Optional, Tuple
 from PySide6.QtCore import QThread, Signal
 
 from pagepilot.ai.ollama_client import ChatMessage, OllamaClient, OllamaError
+from pagepilot.ai.claim_models import (
+    Claim,
+    Contradiction,
+    Evidence,
+    InformationRequirement,
+    VerificationStatus,
+    VerifiedAnswer,
+)
+from pagepilot.ai.claim_verifier import ClaimVerifier
+from pagepilot.ai.query_planner import QueryPlanner
 from pagepilot.ai.prompts import (
     RAG_SYSTEM_PROMPT,
+    STRUCTURED_CLAIM_SYSTEM_PROMPT,
     SUMMARIZE_SYSTEM_PROMPT,
     build_rag_user_prompt,
+    build_structured_claim_prompt,
     build_summarize_doc_prompt,
+    parse_structured_claims_json,
 )
 from pagepilot.config import RETRIEVAL_TOP_K
 from pagepilot.db.database import DocumentDB
@@ -122,6 +135,105 @@ class RAGService:
         stream = self.client.chat_stream(messages, cancel_flag=cancel_flag)
         return stream, citations
 
+    def answer_question_verified(
+        self,
+        question: str,
+        document_ids: list[int] | None = None,
+        cancel_flag: list[bool] | None = None,
+    ) -> VerifiedAnswer:
+        """
+        Stage 6A Multi-Document Reasoning & Claim-Level Verification Pipeline.
+        1. Query planning and decomposition into bounded requirements.
+        2. Cross-document hybrid retrieval balancing multi-source evidence.
+        3. Contradiction detection across documents.
+        4. Structured atomic factual claim generation.
+        5. Conservative claim verification against cited evidence IDs.
+        6. Sentence-level citation rendering with explicit abstention for missing facts.
+        """
+        planner = QueryPlanner(self.client)
+        requirements = planner.plan(question)
+
+        evidence_list, updated_reqs = self.retriever.retrieve_cross_document(
+            requirements=requirements,
+            document_ids=document_ids,
+            top_k_per_req=4,
+            max_total_evidence=12,
+            balance_diversity=True,
+        )
+
+        evidence_map: dict[str, Evidence] = {e.evidence_id: e for e in evidence_list}
+
+        # Track requirements with insufficient evidence
+        unanswered: list[str] = [
+            req.description or req.subquery
+            for req in updated_reqs
+            if not req.has_sufficient_evidence
+        ]
+
+        verifier = ClaimVerifier()
+        contradictions = verifier.detect_cross_document_contradictions(evidence_list)
+
+        if not evidence_list:
+            return VerifiedAnswer(
+                question=question,
+                claims=[],
+                evidence_map={},
+                contradictions=[],
+                unanswered_requirements=[question] if not unanswered else unanswered,
+                contributing_documents=[],
+                raw_response="",
+            )
+
+        user_prompt = build_structured_claim_prompt(
+            question=question,
+            evidence_list=evidence_list,
+            requirements=updated_reqs,
+        )
+        messages = [
+            ChatMessage(role="system", content=STRUCTURED_CLAIM_SYSTEM_PROMPT),
+            ChatMessage(role="user", content=user_prompt),
+        ]
+
+        # Call model to obtain structured JSON claims
+        raw_output_tokens: list[str] = []
+        for token in self.client.chat_stream(messages, cancel_flag=cancel_flag):
+            if cancel_flag and cancel_flag[0]:
+                break
+            raw_output_tokens.append(token)
+        raw_output = "".join(raw_output_tokens)
+
+        # Parse structured claims
+        parsed_claims, model_unanswered = parse_structured_claims_json(
+            raw_output,
+            available_evidence_ids=set(evidence_map.keys()),
+        )
+
+        for u in model_unanswered:
+            if u not in unanswered:
+                unanswered.append(u)
+
+        # Verify claims against evidence
+        verified_claims = verifier.verify_all(parsed_claims, evidence_map)
+
+        # Determine contributing documents from supported claims
+        contributing_docs: set[str] = set()
+        for c in verified_claims:
+            if c.verification_status == VerificationStatus.SUPPORTED:
+                for eid in c.evidence_ids:
+                    ev = evidence_map.get(eid)
+                    if ev:
+                        contributing_docs.add(ev.filename)
+
+        return VerifiedAnswer(
+            question=question,
+            claims=verified_claims,
+            evidence_map=evidence_map,
+            contradictions=contradictions,
+            unanswered_requirements=unanswered,
+            contributing_documents=sorted(list(contributing_docs)),
+            raw_response=raw_output,
+        )
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Background Worker for PySide6
@@ -130,13 +242,15 @@ class RAGService:
 class RAGWorker(QThread):
     """
     QThread worker for running RAG retrieval and streaming inference in background.
+    Supports both standard streaming and Stage 6A verified multi-document mode.
     """
 
-    token_received   = Signal(str)
-    citations_ready  = Signal(list)     # list[Citation]
-    finished         = Signal(str, list) # (full_text, list[Citation])
-    error_occurred   = Signal(str)
-    cancelled        = Signal()
+    token_received        = Signal(str)
+    citations_ready       = Signal(list)     # list[Citation]
+    finished              = Signal(str, list) # (full_text, list[Citation])
+    verified_answer_ready = Signal(object)   # VerifiedAnswer
+    error_occurred        = Signal(str)
+    cancelled             = Signal()
 
     def __init__(
         self,
@@ -145,6 +259,7 @@ class RAGWorker(QThread):
         document_ids: list[int] | None = None,
         is_summary: bool = False,
         summary_doc_id: int | None = None,
+        is_verified_mode: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -153,6 +268,7 @@ class RAGWorker(QThread):
         self._doc_ids = document_ids
         self._is_summary = is_summary
         self._summary_doc_id = summary_doc_id
+        self._is_verified_mode = is_verified_mode
         self._cancel = [False]
         self._accumulated = ""
         self._citations: list[Citation] = []
@@ -163,6 +279,46 @@ class RAGWorker(QThread):
 
     def run(self):
         try:
+            if self._is_verified_mode and not self._is_summary:
+                # Stage 6A: Verified Multi-Document Answer Generation
+                verified_ans = self._service.answer_question_verified(
+                    self._question,
+                    document_ids=self._doc_ids,
+                    cancel_flag=self._cancel,
+                )
+
+                if self._cancel[0]:
+                    self.cancelled.emit()
+                    return
+
+                # Convert evidence_map to Citation objects for citation pills
+                citations_list: list[Citation] = []
+                seen_pairs: set[tuple[int, int]] = set()
+                for ev in verified_ans.evidence_map.values():
+                    pair = (ev.document_id, ev.page_number)
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        citations_list.append(
+                            Citation(
+                                document_id=ev.document_id,
+                                filename=ev.filename,
+                                page_number=ev.page_number,
+                                chunk_text=ev.original_text,
+                                relevance_score=1.0 / ev.retrieval_rank,
+                            )
+                        )
+
+                self._citations = citations_list
+                self.citations_ready.emit(citations_list)
+
+                rendered_text = verified_ans.render_sentence_level_text()
+                self._accumulated = rendered_text
+                self.token_received.emit(rendered_text)
+
+                self.verified_answer_ready.emit(verified_ans)
+                self.finished.emit(rendered_text, citations_list)
+                return
+
             if self._is_summary and self._summary_doc_id is not None:
                 stream, citations = self._service.summarize_document(
                     self._summary_doc_id,

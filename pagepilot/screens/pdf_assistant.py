@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from pagepilot.ai.ollama_client import OllamaClient
 from pagepilot.ai.rag_service import RAGService, RAGWorker
+from pagepilot.ai.claim_models import VerifiedAnswer
 from pagepilot.config import (
     DOCS_DB_PATH,
     EMBED_MODEL,
@@ -219,6 +220,12 @@ class QAMessageWidget(QFrame):
         self._doc_paths = doc_paths
         self._refresh_citations()
 
+    def set_verified_answer(self, verified_answer: VerifiedAnswer, doc_paths: dict[str, str]):
+        """Render verified structured answer with sentence-level citations and contradiction alerts."""
+        self._doc_paths = doc_paths
+        rendered_text = verified_answer.render_sentence_level_text()
+        self.set_text(rendered_text)
+
     def _refresh_citations(self):
         # Clear existing pills
         while self._cit_layout.count() > 0:
@@ -314,6 +321,7 @@ class PdfScreen(QWidget):
 
         # State
         self._selected_doc_id: Optional[int] = None
+        self._selected_doc_ids: set[int] = set()
         self._ingestion_worker: Optional[_IngestionWorker] = None
         self._rag_worker: Optional[RAGWorker] = None
         self._tts_thread: Optional[TtsThread] = None
@@ -651,7 +659,7 @@ class PdfScreen(QWidget):
 
     def _make_doc_card(self, doc: Document) -> QFrame:
         card = QFrame()
-        is_selected = (self._selected_doc_id == doc.id)
+        is_selected = (doc.id in self._selected_doc_ids) or (self._selected_doc_id == doc.id)
 
         border_color = Colors.ACCENT if is_selected else Colors.BORDER
         bg_color = Colors.BG_SURFACE_ALT if is_selected else Colors.BG_ELEVATED
@@ -673,7 +681,8 @@ class PdfScreen(QWidget):
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(6)
 
-        title_lbl = QLabel(doc.filename)
+        title_text = f"✓ {doc.filename}" if is_selected else doc.filename
+        title_lbl = QLabel(title_text)
         title_lbl.setFont(Fonts.make(Fonts.SIZE_SM, QFont.Weight.DemiBold))
         title_lbl.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; border: none; background: transparent;")
         title_row.addWidget(title_lbl, 1)
@@ -710,26 +719,42 @@ class PdfScreen(QWidget):
         return card
 
     def _select_all_docs(self):
+        self._selected_doc_ids.clear()
         self._selected_doc_id = None
         self._all_docs_btn.setStyleSheet(self._filter_btn_style(active=True))
         self._load_document_list()
 
     def _on_doc_selected(self, doc_id: int):
-        self._selected_doc_id = doc_id
-        self._all_docs_btn.setStyleSheet(self._filter_btn_style(active=False))
+        if doc_id in self._selected_doc_ids:
+            self._selected_doc_ids.remove(doc_id)
+        else:
+            self._selected_doc_ids.add(doc_id)
+
+        if len(self._selected_doc_ids) == 1:
+            self._selected_doc_id = list(self._selected_doc_ids)[0]
+        else:
+            self._selected_doc_id = None
+
+        self._all_docs_btn.setStyleSheet(self._filter_btn_style(active=(len(self._selected_doc_ids) == 0)))
         self._load_document_list()
 
     def _update_scope_label(self):
-        if self._selected_doc_id is None:
+        if not self._selected_doc_ids and self._selected_doc_id is None:
             count = self._doc_manager.count_documents()
             chunks = self._doc_manager.count_chunks()
             self._scope_label.setText(f"Scope: All Documents ({count} PDFs, {chunks} chunks)")
             self._summarize_btn.setEnabled(chunks > 0)
-        else:
-            doc = self._doc_manager.get_document(self._selected_doc_id)
+        elif len(self._selected_doc_ids) == 1 or self._selected_doc_id is not None:
+            did = self._selected_doc_id or list(self._selected_doc_ids)[0]
+            doc = self._doc_manager.get_document(did)
             if doc:
-                self._scope_label.setText(f"Scope: {doc.filename} ({doc.page_count} pages, {doc.chunk_count} chunks)")
+                self._scope_label.setText(f"Scope: {doc.filename} (1 PDF selected, {doc.page_count} pages)")
                 self._summarize_btn.setEnabled(doc.chunk_count > 0)
+        else:
+            selected_docs = [self._doc_manager.get_document(did) for did in self._selected_doc_ids]
+            names = ", ".join(d.filename for d in selected_docs if d)
+            self._scope_label.setText(f"Scope: {len(self._selected_doc_ids)} PDFs Selected ({names})")
+            self._summarize_btn.setEnabled(True)
 
     # ── Import & Ingestion ───────────────────────────────────────────
 
@@ -790,9 +815,10 @@ class PdfScreen(QWidget):
         self._load_document_list()
 
     def _on_delete_doc(self, doc_id: int):
-        self._doc_manager.delete_document(doc_id)
+        self._selected_doc_ids.discard(doc_id)
         if self._selected_doc_id == doc_id:
             self._selected_doc_id = None
+        self._doc_manager.delete_document(doc_id)
         self._load_document_list()
 
     # ── Q&A Execution ────────────────────────────────────────────────
@@ -833,17 +859,24 @@ class PdfScreen(QWidget):
         # Map filenames to paths for citation clicking
         doc_paths = {d.filename: d.file_path for d in self._doc_manager.list_documents()}
 
-        target_doc_ids = [self._selected_doc_id] if self._selected_doc_id is not None else None
+        if self._selected_doc_ids:
+            target_doc_ids = list(self._selected_doc_ids)
+        elif self._selected_doc_id is not None:
+            target_doc_ids = [self._selected_doc_id]
+        else:
+            target_doc_ids = None
 
         self._rag_worker = RAGWorker(
             rag_service=self._rag_service,
             question=question,
             document_ids=target_doc_ids,
             is_summary=False,
+            is_verified_mode=True,
             parent=self,
         )
         self._rag_worker.token_received.connect(self._on_token_received)
         self._rag_worker.citations_ready.connect(lambda cits: asst_w.set_citations(cits, doc_paths))
+        self._rag_worker.verified_answer_ready.connect(lambda v_ans: asst_w.set_verified_answer(v_ans, doc_paths))
         self._rag_worker.finished.connect(self._on_rag_finished)
         self._rag_worker.error_occurred.connect(self._on_rag_error)
         self._rag_worker.cancelled.connect(self._on_rag_cancelled)

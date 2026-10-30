@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Union
 from PySide6.QtCore import QObject, QThread, Signal
 
+from pagepilot.ai.claim_models import VerifiedAnswer
 from pagepilot.config import DOCX_OUTPUT_DIR, ensure_docx_dir
 from pagepilot.db.database import DocumentDB
 from pagepilot.docx.citation_formatter import CitationMode, format_inline_citation
@@ -333,6 +334,96 @@ class DocxService:
             citations=citations,
             citation_mode=citation_mode,
             output_path=output_path,
+        )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Document Type: Multi-Document Verified Report (Stage 6A)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def generate_multi_document_report(
+        self,
+        verified_answer: VerifiedAnswer,
+        template_name: str = "Project Report",
+        citation_mode: str = CitationMode.BOTH,
+        output_path: Optional[Union[str, Path]] = None,
+        custom_title: Optional[str] = None,
+    ) -> Path:
+        """
+        Format a Stage 6A multi-document verified answer into an executive report.
+        Preserves sentence-level citations, contradiction callouts, and sources.
+        """
+        title = custom_title or f"Research Report: {verified_answer.question[:50]}"
+        sections = [
+            f"# {title}",
+            "",
+            "> **Executive Summary**: Evidence-grounded synthesis across multiple sources. "
+            "Every factual claim is independently verified against document provenance.",
+            "",
+            "## 1. Verified Findings",
+            "",
+        ]
+
+        supported_claims = verified_answer.get_supported_claims()
+        citations = []
+
+        if supported_claims:
+            for c in supported_claims:
+                cite_tags = []
+                for eid in c.evidence_ids:
+                    ev = verified_answer.evidence_map.get(eid)
+                    if ev:
+                        cite_tags.append(format_inline_citation(ev.filename, ev.page_number))
+                        citations.append({
+                            "filename": ev.filename,
+                            "page_number": ev.page_number,
+                            "snippet": ev.original_text[:180],
+                        })
+                tag_str = f" {' '.join(cite_tags)}" if (cite_tags and CitationMode.should_include_inline(citation_mode)) else ""
+                sections.append(f"- {c.text.strip().rstrip('.')}.{tag_str}")
+        else:
+            sections.append(
+                "Based on the selected documents, no fully supported factual claims could be verified."
+            )
+
+        sections.append("")
+
+        # Contradictions Section if present
+        if verified_answer.contradictions:
+            sections.append("## 2. Cross-Document Contradictions & Disagreements")
+            sections.append("")
+            for c in verified_answer.contradictions:
+                sections.append(f"### Disagreement: {c.topic}")
+                sections.append(
+                    f"> **Source Discrepancy**: {c.source_a} asserts \"{c.statement_a}\", "
+                    f"whereas {c.source_b} asserts \"{c.statement_b}\". ({c.explanation})"
+                )
+                sections.append("")
+
+        # Unanswered Requirements Section if present
+        if verified_answer.unanswered_requirements:
+            sections.append("## 3. Scope Limitations & Missing Evidence")
+            sections.append("")
+            for req in verified_answer.unanswered_requirements:
+                sections.append(f"- **Insufficient Evidence**: Could not substantiate *{req}* from selected sources.")
+            sections.append("")
+
+        markdown_body = "\n".join(sections)
+        docs_str = ", ".join(verified_answer.contributing_documents) if verified_answer.contributing_documents else "Multiple Sources"
+        metadata = {
+            "source_doc": docs_str,
+            "claims_count": len(supported_claims),
+            "contradictions": len(verified_answer.contradictions),
+        }
+
+        return self.generator.generate(
+            title=title,
+            content=markdown_body,
+            subtitle="Multi-Document Verification Report",
+            template_name=template_name,
+            citations=citations,
+            citation_mode=citation_mode,
+            output_path=output_path,
+            metadata=metadata,
         )
 
     # ──────────────────────────────────────────────────────────────────────────

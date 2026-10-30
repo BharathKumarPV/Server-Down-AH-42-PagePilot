@@ -1,12 +1,21 @@
 # PagePilot
 
-**Offline-first personal AI assistant** for local chat, voice interaction, PDF document intelligence, DOCX creation, and offline navigation.
+**Offline-first personal AI assistant** for local chat, voice interaction, PDF document intelligence, DOCX creation, multi-document reasoning, and offline navigation.
 
 ---
 
-## Current Status — Stage 5: Professional DOCX Generation & PDF Intelligence
+## Current Status — Stage 6A: Faithful to Every Sentence (Multi-Document Reasoning & Claim Verification)
 
 PagePilot currently supports:
+- **Faithful to Every Sentence (Stage 6A):**
+  - **Multi-Document Reasoning & Synthesis:** Users can select 2 or more PDFs simultaneously to perform cross-document comparison, requirement synthesis, and cross-source analysis.
+  - **Deterministic Query Planning:** Automatically decomposes complex multi-document questions into atomic information requirements (subqueries) to ensure targeted retrieval across disparate documents.
+  - **Cross-Document Hybrid Retrieval:** Performs balanced, multi-query retrieval across ChromaDB and SQLite FTS5 with cross-document chunk deduplication and diversity balancing so no single document starves others.
+  - **Claim-Level Evidence Verification:** Parses LLM responses into structured atomic factual claims and verifies each claim against application-managed evidence chunks (`[E1]`, `[E2]`). Claims receive deterministic statuses: `SUPPORTED`, `CONTRADICTED`, `INSUFFICIENT_EVIDENCE`, `INVALID_CITATION`, or `NEEDS_REVIEW`.
+  - **Cross-Document Contradiction Engine:** Automatically scans retrieved evidence pairs for conflicting numerical metrics, opposing policy/status definitions (e.g. `supported` vs `deprecated`), and flags them as structured contradiction notices in the UI and DOCX reports.
+  - **Sentence-Level Citations:** Formats answers with verifiable sentence-level citations (`[E1, E2]` mapping to `[Document.pdf, p. N]`). Unsupported assertions are highlighted with warning indicators rather than presented as verified facts.
+  - **Explicit Missing Evidence Handling:** When information requirements lack grounding evidence, the assistant explicitly reports which information is missing and refrains from fabricating answers.
+  - **Multi-Document DOCX Report:** Exports verified multi-document synthesis to Word documents with full claim verification tables, contradiction warnings, and citation bibliographies.
 - **Professional DOCX Engine (Stage 5):**
   - **Local Document Automation:** Native Microsoft Word (.docx) generation powered by `python-docx` and `lxml`.
   - **5 Document Types:** PDF Summary, Study Notes, Question & Answer Notes, Project Report, Selected PDF Content, and Custom Documents.
@@ -35,10 +44,11 @@ PagePilot currently supports:
 | Capability | Technology | Details |
 |---|---|---|
 | Desktop GUI | PySide6 (Qt 6.x) | Native Windows 11 Fluent-inspired theme |
-| Local LLM | Ollama + Qwen2.5 3B | Streaming chat at `127.0.0.1:11434` |
+| Local LLM | Ollama + Qwen2.5 3B | Streaming chat and structured claim generation at `127.0.0.1:11434` |
 | Local Embeddings | Ollama + nomic-embed-text | 768-dimensional dense vectors via `/api/embed` |
 | Vector Store | ChromaDB (Local persistent) | Stored in `%APPDATA%\PagePilot\vectordb\` |
 | Keyword Search | SQLite FTS5 (unicode61) | Full-text search with LIKE fallback |
+| Claim Verification | Python deterministic engine | Lexical overlap, entity consistency, contradiction detection |
 | Document Storage | SQLite (`sqlite3`) | `%APPDATA%\PagePilot\documents.db` |
 | Chat Persistence | SQLite (`sqlite3`) | `%APPDATA%\PagePilot\conversations.db` |
 | PDF Extraction | PyMuPDF (`pymupdf`) | Fast streaming extraction, page metadata |

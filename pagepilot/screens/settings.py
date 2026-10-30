@@ -298,8 +298,10 @@ class SettingsScreen(QWidget):
         layout.addWidget(feature_row("Voice Recognition",    "Active",          "success", "Stage 3 — Whisper.cpp + Piper TTS"))
         layout.addWidget(feature_row("PDF Processing",       "Active",          "success", "Stage 4 — PyMuPDF + ChromaDB + nomic-embed-text"))
         layout.addWidget(feature_row("DOCX Generation",      "Active",          "success", "Stage 5 — python-docx + 5 templates + citations"))
-        layout.addWidget(feature_row("Android Application",  "Not Implemented", "default", "Planned — Stage 6"))
-        layout.addWidget(feature_row("Offline Maps",         "Not Implemented", "default", "Planned — Stage 7"))
+        layout.addWidget(feature_row("Multi-Doc Reasoning",  "Active",          "success", "Stage 6A — Faithful to Every Sentence (Cross-Doc & Claim Verifier)"))
+        layout.addWidget(feature_row("Handwriting & Math",   "Not Implemented", "default", "Planned — Stage 6B"))
+        layout.addWidget(feature_row("Android Application",  "Not Implemented", "default", "Planned — Future"))
+        layout.addWidget(feature_row("Offline Maps",         "Not Implemented", "default", "Planned — Future"))
         return card
 
     # ── Storage card ─────────────────────────────────────────────────

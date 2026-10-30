@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from pagepilot.config import RETRIEVAL_TOP_K
+from pagepilot.ai.claim_models import Evidence, InformationRequirement
 from pagepilot.pdf.models import Chunk, RetrievalResult
 from pagepilot.retrieval.embedding_client import EmbeddingClient, EmbeddingError
 from pagepilot.retrieval.keyword_search import KeywordSearch
@@ -126,4 +127,112 @@ class HybridRetriever:
 
         final_chunks = [chunks_by_id[cid] for cid in sorted_chunk_ids[:top_k]]
         return RetrievalResult(chunks=final_chunks, method=method)
+
+    def retrieve_cross_document(
+        self,
+        requirements: list[InformationRequirement],
+        document_ids: list[int] | None = None,
+        top_k_per_req: int = 4,
+        max_total_evidence: int = 12,
+        balance_diversity: bool = True,
+    ) -> tuple[list[Evidence], list[InformationRequirement]]:
+        """
+        Execute multi-query cross-document retrieval.
+        Gathers evidence for each information requirement, deduplicates identical
+        chunks, balances document representation, and constructs Evidence objects.
+        """
+        if not requirements:
+            return [], []
+
+        # Map: chunk_id -> dict of (chunk, method, list_of_req_ids, min_rank)
+        merged_chunks: dict[str, dict] = {}
+        updated_reqs: list[InformationRequirement] = []
+
+        for req in requirements:
+            res = self.retrieve(
+                query=req.subquery,
+                document_ids=document_ids,
+                top_k=top_k_per_req,
+            )
+
+            has_evidence = len(res.chunks) > 0
+            supported_docs = sorted(list({c.document_id for c in res.chunks})) if has_evidence else []
+
+            updated_reqs.append(
+                InformationRequirement(
+                    requirement_id=req.requirement_id,
+                    subquery=req.subquery,
+                    description=req.description,
+                    supported_doc_ids=supported_docs,
+                    has_sufficient_evidence=has_evidence,
+                )
+            )
+
+            for rank_idx, chunk in enumerate(res.chunks):
+                if chunk.chunk_id not in merged_chunks:
+                    merged_chunks[chunk.chunk_id] = {
+                        "chunk": chunk,
+                        "method": res.method,
+                        "req_ids": [req.requirement_id],
+                        "best_rank": rank_idx + 1,
+                    }
+                else:
+                    if req.requirement_id not in merged_chunks[chunk.chunk_id]["req_ids"]:
+                        merged_chunks[chunk.chunk_id]["req_ids"].append(req.requirement_id)
+                    merged_chunks[chunk.chunk_id]["best_rank"] = min(
+                        merged_chunks[chunk.chunk_id]["best_rank"],
+                        rank_idx + 1,
+                    )
+
+        if not merged_chunks:
+            return [], updated_reqs
+
+        # Diversity balancing: avoid single document crowding out others
+        if balance_diversity and document_ids and len(document_ids) > 1:
+            # Group by document_id
+            by_doc: dict[int, list[dict]] = {}
+            for item in merged_chunks.values():
+                doc_id = item["chunk"].document_id
+                by_doc.setdefault(doc_id, []).append(item)
+
+            for d_items in by_doc.values():
+                d_items.sort(key=lambda x: (len(x["req_ids"]) * -1, x["best_rank"]))
+
+            selected_items: list[dict] = []
+            # Round-robin pick from each contributing document
+            max_rounds = max(len(items) for items in by_doc.values())
+            for round_idx in range(max_rounds):
+                for doc_id, items in by_doc.items():
+                    if round_idx < len(items) and len(selected_items) < max_total_evidence:
+                        if items[round_idx] not in selected_items:
+                            selected_items.append(items[round_idx])
+
+            candidate_items = selected_items
+        else:
+            # Sort by number of requirements satisfied desc, then best rank asc
+            candidate_items = sorted(
+                merged_chunks.values(),
+                key=lambda x: (len(x["req_ids"]) * -1, x["best_rank"]),
+            )[:max_total_evidence]
+
+        # Convert to Evidence objects with clean E1, E2, ... IDs
+        evidence_list: list[Evidence] = []
+        for idx, item in enumerate(candidate_items, 1):
+            ch: Chunk = item["chunk"]
+            evidence_list.append(
+                Evidence(
+                    evidence_id=f"E{idx}",
+                    document_id=ch.document_id,
+                    filename=ch.filename,
+                    page_number=ch.page_number,
+                    chunk_id=ch.chunk_id,
+                    chunk_index=ch.chunk_index,
+                    original_text=ch.text,
+                    retrieval_method=item["method"],
+                    retrieval_rank=idx,
+                    query_requirement_id=",".join(item["req_ids"]),
+                )
+            )
+
+        return evidence_list, updated_reqs
 

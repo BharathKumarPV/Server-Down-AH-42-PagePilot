@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "PagePilot"
-APP_VERSION = "0.5.0-stage5"
+APP_VERSION = "0.6.0-stage6a"
 APP_DESCRIPTION = "Offline-first AI assistant"
 APP_AUTHOR = "PagePilot Team"
 
