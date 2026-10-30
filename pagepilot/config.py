@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "PagePilot"
-APP_VERSION = "0.3.0-stage3"
+APP_VERSION = "0.4.0-stage4"
 APP_DESCRIPTION = "Offline-first AI assistant"
 APP_AUTHOR = "PagePilot Team"
 
@@ -78,6 +78,21 @@ PIPER_VOICE_DIR    = _PIPER_VOICE_DIR
 def ensure_piper_dir() -> Path:
     _PIPER_VOICE_DIR.mkdir(parents=True, exist_ok=True)
     return _PIPER_VOICE_DIR
+
+# ──────────────────────────────────────────────
+# PDF & Retrieval / Stage 4 configuration
+# ──────────────────────────────────────────────
+EMBED_MODEL          = os.environ.get("PAGEPILOT_EMBED_MODEL", "nomic-embed-text")
+CHUNK_SIZE_TOKENS    = int(os.environ.get("PAGEPILOT_CHUNK_SIZE", "500"))
+CHUNK_OVERLAP_TOKENS = int(os.environ.get("PAGEPILOT_CHUNK_OVERLAP", "50"))
+RETRIEVAL_TOP_K      = int(os.environ.get("PAGEPILOT_TOP_K", "5"))
+
+DOCS_DB_PATH         = _APP_DATA_DIR / "documents.db"
+CHROMA_DIR           = _APP_DATA_DIR / "vectordb"
+
+def ensure_chroma_dir() -> Path:
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    return CHROMA_DIR
 
 # ──────────────────────────────────────────────
 # Navigation item IDs  (used as page keys in stacked widget)

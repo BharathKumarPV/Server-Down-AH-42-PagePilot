@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
 from pagepilot.ai.ollama_client import OllamaClient, OllamaStatus
 from pagepilot.config import (
     APP_AUTHOR, APP_DESCRIPTION, APP_NAME, APP_VERSION,
-    DB_PATH, MODEL_NAME, NUM_CTX, OLLAMA_HOST, REQUEST_TIMEOUT,
+    DB_PATH, DOCS_DB_PATH, CHROMA_DIR, EMBED_MODEL,
+    MODEL_NAME, NUM_CTX, OLLAMA_HOST, REQUEST_TIMEOUT,
     WHISPER_MODEL_DIR, PIPER_VOICE_DIR,
 )
 from pagepilot.theme import Colors, Fonts, Radius, Spacing
@@ -75,6 +76,7 @@ class SettingsScreen(QWidget):
         body_layout.addWidget(self._build_app_card())
         body_layout.addWidget(self._build_ai_card())
         body_layout.addWidget(VoiceSettingsCard())
+        body_layout.addWidget(self._build_pdf_card())
         body_layout.addWidget(self._build_roadmap_card())
         body_layout.addWidget(self._build_storage_card())
         body_layout.addWidget(self._build_system_card())
@@ -148,7 +150,7 @@ class SettingsScreen(QWidget):
 
         layout.addWidget(InfoRow("Author",  APP_AUTHOR))
         layout.addWidget(InfoRow("Version", APP_VERSION))
-        layout.addWidget(InfoRow("Stage",   "Stage 3 — Offline Voice (Whisper + Piper) & AI Chat"))
+        layout.addWidget(InfoRow("Stage",   "Stage 4 — Offline PDF Intelligence, Voice & AI Chat"))
         return card
 
     # ── AI / Ollama card ─────────────────────────────────────────────
@@ -246,6 +248,20 @@ class SettingsScreen(QWidget):
             layout.insertWidget(idx, new_badge)
         row["badge"] = new_badge
 
+    # ── PDF Intelligence card (Stage 4) ───────────────────────────────
+
+    def _build_pdf_card(self) -> Card:
+        card = Card(title="PDF Intelligence & RAG")
+        layout = card.body_layout()
+
+        layout.addWidget(InfoRow("Embed Model",       EMBED_MODEL))
+        layout.addWidget(InfoRow("Vector Dimension",  "768 float32"))
+        layout.addWidget(InfoRow("Retrieval Engine",  "Hybrid RRF (Cosine Vector + SQLite FTS5)"))
+        layout.addWidget(InfoRow("Vector Database",   "ChromaDB (Local, Telemetry Disabled)"))
+        layout.addWidget(InfoRow("Text Extractor",    "PyMuPDF (Page-level provenance)"))
+        layout.addWidget(InfoRow("Citation Fidelity", "Verified 1-based page metadata"))
+        return card
+
     # ── Roadmap card ─────────────────────────────────────────────────
 
     def _build_roadmap_card(self) -> Card:
@@ -280,7 +296,7 @@ class SettingsScreen(QWidget):
         layout.addWidget(feature_row("AI Chat",              "Active",          "success", "Stage 2 — qwen2.5:3b via Ollama"))
         layout.addWidget(feature_row("Offline Mode",         "No cloud APIs",   "info",    "All inference is local"))
         layout.addWidget(feature_row("Voice Recognition",    "Active",          "success", "Stage 3 — Whisper.cpp + Piper TTS"))
-        layout.addWidget(feature_row("PDF Processing",       "Not Implemented", "default", "Planned — Stage 4"))
+        layout.addWidget(feature_row("PDF Processing",       "Active",          "success", "Stage 4 — PyMuPDF + ChromaDB + nomic-embed-text"))
         layout.addWidget(feature_row("DOCX Generation",      "Not Implemented", "default", "Planned — Stage 5"))
         layout.addWidget(feature_row("Android Application",  "Not Implemented", "default", "Planned — Stage 6"))
         layout.addWidget(feature_row("Offline Maps",         "Not Implemented", "default", "Planned — Stage 7"))
@@ -296,12 +312,18 @@ class SettingsScreen(QWidget):
         db_exists = DB_PATH.exists()
         db_size = f"{DB_PATH.stat().st_size / 1024:.1f} KB" if db_exists else "not yet created"
 
-        layout.addWidget(InfoRow("Database",       db_path))
-        layout.addWidget(InfoRow("DB Size",        db_size))
-        layout.addWidget(InfoRow("Whisper Models", str(WHISPER_MODEL_DIR)))
-        layout.addWidget(InfoRow("Piper Voices",   str(PIPER_VOICE_DIR)))
-        layout.addWidget(InfoRow("Ollama Models",  "Managed by Ollama runtime"))
-        layout.addWidget(InfoRow("Map Tiles",      "None — Stage 7"))
+        docs_db_exists = DOCS_DB_PATH.exists()
+        docs_db_size = f"{DOCS_DB_PATH.stat().st_size / 1024:.1f} KB" if docs_db_exists else "not yet created"
+
+        layout.addWidget(InfoRow("Chat Database",     db_path))
+        layout.addWidget(InfoRow("Chat DB Size",      db_size))
+        layout.addWidget(InfoRow("Documents DB",      str(DOCS_DB_PATH)))
+        layout.addWidget(InfoRow("Documents DB Size", docs_db_size))
+        layout.addWidget(InfoRow("Vector Store",      str(CHROMA_DIR)))
+        layout.addWidget(InfoRow("Whisper Models",    str(WHISPER_MODEL_DIR)))
+        layout.addWidget(InfoRow("Piper Voices",      str(PIPER_VOICE_DIR)))
+        layout.addWidget(InfoRow("Ollama Models",     "Managed by Ollama runtime"))
+        layout.addWidget(InfoRow("Map Tiles",         "None — Stage 7"))
         return card
 
     # ── System card ──────────────────────────────────────────────────

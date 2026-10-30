@@ -23,8 +23,12 @@ def main() -> int:
 
     apply_theme(app)
 
+    print("Loading PagePilot components...", flush=True)
     window = MainWindow()
     window.show()
+    window.raise_()
+    window.activateWindow()
+    print("PagePilot Desktop is now open! (Check your taskbar or press Alt+Tab if behind terminal)", flush=True)
 
     return app.exec()
 

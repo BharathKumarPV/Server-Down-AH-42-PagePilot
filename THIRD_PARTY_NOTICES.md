@@ -1,6 +1,6 @@
 # Third-Party Notices & Licensing Guide
 
-PagePilot integrates open-source components for offline AI inference, speech recognition, and speech synthesis. This document describes the licenses of third-party libraries and runtime models used in Stage 3.
+PagePilot integrates open-source components for offline AI inference, speech recognition, speech synthesis, and document intelligence. This document describes the licenses of third-party libraries and runtime models used in Stage 4.
 
 ---
 
@@ -54,8 +54,18 @@ Piper voice models (`.onnx` and `.onnx.json`) are developed independently and ho
 ## 4. PySide6 & Qt 6
 
 * **Library:** PySide6 (Qt for Python)
-* **License:** **GNU Lesser General Public License v3 (LGPL-3.0)** / Commercial
-* Dynamic linking to Qt libraries allows proprietary and open-source applications complying with LGPL-3.0 requirements.
+* **Licensing Model:** Dual/Multi-Licensed (Community Edition vs Commercial Edition)
+
+### A. Qt for Python Community Edition:
+1. **LGPL-3.0 (GNU Lesser General Public License v3):**
+   * The core modules used by PagePilot (`QtCore`, `QtGui`, `QtWidgets`) are available under LGPL-3.0.
+   * **Obligations for redistribution:** Applications may dynamically link to PySide6/Qt libraries. If redistributed as a binary package, you must provide the LGPL-3.0 license text, include copyright notices, and allow users to replace or relink the shared Qt libraries (ensuring reverse engineering is permitted for debugging modifications to those libraries).
+2. **GPL-3.0 (GNU General Public License v3):**
+   * Certain optional modules, extensions, and build tools within Qt are available only under GPL-3.0. If any GPL-3.0-only Qt module is utilized, the entire combined software distribution must be licensed under GPL-3.0.
+
+### B. Qt Commercial Edition:
+* Developed and distributed by **The Qt Company** ([qt.io](https://www.qt.io)).
+* Provides proprietary commercial licensing without open-source copyleft obligations, source code disclosure requirements, or relinking restrictions. Required for organizations unwilling or unable to comply with LGPLv3 or GPLv3 terms.
 
 ---
 
@@ -64,3 +74,31 @@ Piper voice models (`.onnx` and `.onnx.json`) are developed independently and ho
 * **Runtime:** Ollama ([ollama.com](https://ollama.com)) — MIT License
 * **Model:** Qwen2.5 3B Instruct — Apache 2.0 License by Alibaba Cloud
 
+---
+
+## 6. PyMuPDF (`pymupdf`) (Stage 4)
+
+* **Project:** [Artifex Software / PyMuPDF](https://github.com/pymupdf/PyMuPDF)
+* **License:** GNU Affero General Public License v3.0 or later (**AGPL-3.0-or-later**) / Commercial
+* **Copyright:** © 2012–2025 Artifex Software, Inc.
+
+### Distribution & AGPL-3.0 Obligations:
+* **Personal & Internal Use:** You may freely run and inspect PagePilot with PyMuPDF locally for personal or internal workflows.
+* **Redistribution / Commercial Distribution:** Any distribution bundling or linking PyMuPDF requires complying with the AGPL-3.0 license (releasing source code of the entire application under AGPL-3.0), or obtaining a commercial license from Artifex Software.
+
+---
+
+## 7. ChromaDB (`chromadb`) (Stage 4)
+
+* **Project:** [chroma-core/chroma](https://github.com/chroma-core/chroma)
+* **License:** **Apache License 2.0**
+* **Copyright:** © 2023–2025 Chroma
+* Permissive Apache 2.0 license. Note that PagePilot explicitly disables ChromaDB telemetry via `Settings(anonymized_telemetry=False)`.
+
+---
+
+## 8. nomic-embed-text (Stage 4)
+
+* **Model:** `nomic-embed-text` by Nomic AI
+* **License:** **Apache License 2.0**
+* **Weights:** 768-dimensional open-weights embedding model optimized for long context (8192 tokens). Used strictly offline via Ollama.
