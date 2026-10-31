@@ -122,7 +122,9 @@ ipython_config.py
 #   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
 # pixi.lock
 #   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
-#   in the .venv directory. It is recommended not to include this directory in version control.
+#   in the .venv
+.venv-ocr/
+.venv*/ directory. It is recommended not to include this directory in version control.
 .pixi/*
 !.pixi/config.toml
 
@@ -153,6 +155,8 @@ activemq-data/
 .env
 .envrc
 .venv
+.venv-ocr/
+.venv*/
 env/
 venv/
 ENV/
@@ -218,3 +222,37 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ── PagePilot Stage 2 additions ───────────────────────────────────────────────
+
+# Virtual environment
+.venv
+.venv-ocr/
+.venv*//
+
+# SQLite conversation databases (contain private user conversations)
+*.db
+*.db-shm
+*.db-wal
+
+# Model files (managed by Ollama, not stored in repo)
+*.gguf
+*.bin
+models/
+
+# Generated documents
+*.docx
+output/
+
+# Temporary / scratch files
+*.tmp
+*.bak
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+
+# OS
+Thumbs.db
+desktop.ini

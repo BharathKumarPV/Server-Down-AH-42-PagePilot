@@ -1,0 +1,24 @@
+# PagePilot Stage 6B Isolated OCR Worker Dependencies
+# TARGET PYTHON ENVIRONMENT: CPython 3.12 (Windows 64-bit)
+# DO NOT install these into the main Python 3.14 environment!
+
+# PaddlePaddle CPU wheel (pinned for Windows x86_64 CPU)
+paddlepaddle==3.3.1
+
+# PaddleOCR framework (PP-OCRv5/v6 recognition)
+paddleocr==3.7.0
+paddlex==3.7.2
+
+# RapidOCR dependency compatible with cnstd & pix2text
+rapidocr==3.9.1
+
+# Pix2Text mathematical formula detection and recognition
+pix2text==1.1.7
+
+# ONNX Runtime for lightweight CPU formula inference
+onnxruntime==1.31.1
+
+# Image & PDF rendering support in worker
+PyMuPDF>=1.23.0
+Pillow>=10.0.0
+numpy>=1.24.0
