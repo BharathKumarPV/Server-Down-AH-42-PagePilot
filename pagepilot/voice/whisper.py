@@ -128,8 +128,17 @@ class TranscriptionThread(QThread):
                 kwargs["language"] = self._language
 
             segments = model.transcribe(self._wav_path, **kwargs)
-            text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
-            text = text.strip()
+            clean_segments = []
+            for seg in segments:
+                t = seg.text.strip()
+                t_lower = t.lower()
+                # Filter out Whisper silence and hallucination artifacts
+                if t and not any(tag in t_lower for tag in [
+                    "[blank_audio]", "[no speech]", "[silence]", "(silence)",
+                    "[music]", "(music)", "[applause]", "(applause)"
+                ]):
+                    clean_segments.append(t)
+            text = " ".join(clean_segments).strip()
 
             if not text:
                 self.error_occurred.emit(

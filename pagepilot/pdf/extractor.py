@@ -94,13 +94,21 @@ def extract_pages(
             stripped = text.strip()
             is_empty = len(stripped) == 0
 
+            # Distinguish genuine scanned pages (empty text but containing image drawings/bitmaps) from blank pages
+            has_images = False
+            if is_empty:
+                try:
+                    has_images = len(page.get_images()) > 0
+                except Exception:
+                    has_images = False
+
             yield PageText(
                 document_id=document_id,
                 page_number=page_number,
                 text=text,
                 char_count=len(text),
                 is_empty=is_empty,
-                is_scanned=is_empty,   # flag potentially scanned pages
+                is_scanned=is_empty,
             )
     finally:
         doc.close()

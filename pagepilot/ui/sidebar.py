@@ -154,7 +154,7 @@ class Sidebar(QWidget):
         root.addStretch()
 
         # ── Bottom version label ──────────────────────────────────────
-        ver = QLabel("Stage 6A — Multi-Doc Reasoning")
+        ver = QLabel("Stage 6B — Notes OCR & Formulas")
         ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ver.setStyleSheet(f"color: {Colors.TEXT_DISABLED}; font-size: {Fonts.SIZE_XS}px; background: transparent; border: none;")
         root.addWidget(ver)

@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
 from pagepilot.ai.ollama_client import OllamaClient
 from pagepilot.ai.rag_service import RAGService, RAGWorker
 from pagepilot.ai.claim_models import VerifiedAnswer
+from pagepilot.ocr.service import OCRService
+from pagepilot.screens.ocr_review_dialog import OCRReviewDialog
 from pagepilot.config import (
     DOCS_DB_PATH,
     EMBED_MODEL,
@@ -318,6 +320,11 @@ class PdfScreen(QWidget):
             embedding_client=self._embedding_client,
         )
         self._doc_manager = DocumentManager(self._db, self._vector_store)
+        self._ocr_service = OCRService(
+            db=self._db,
+            vector_store=self._vector_store,
+            embedding_client=self._embedding_client,
+        )
 
         # State
         self._selected_doc_id: Optional[int] = None
@@ -403,6 +410,10 @@ class PdfScreen(QWidget):
         self._import_btn = PrimaryButton("📂  Import PDF Document(s)")
         self._import_btn.clicked.connect(self._on_import_clicked)
         layout.addWidget(self._import_btn)
+
+        self._import_image_btn = SecondaryButton("📷  Import Notes / Images")
+        self._import_image_btn.clicked.connect(self._on_import_image_clicked)
+        layout.addWidget(self._import_image_btn)
 
         # Progress bar (hidden by default)
         self._progress_card = QFrame()
@@ -687,6 +698,21 @@ class PdfScreen(QWidget):
         title_lbl.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; border: none; background: transparent;")
         title_row.addWidget(title_lbl, 1)
 
+        is_ocr_doc = (
+            doc.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")) or
+            "scanned" in (doc.error_message or "").lower() or
+            doc.status == "ocr_pending_review"
+        )
+        if is_ocr_doc:
+            ocr_btn = IconButton("🔍", "Review OCR & Formulas", size=24)
+            ocr_btn.clicked.connect(lambda chk=False, did=doc.id: self._open_ocr_review(did))
+            title_row.addWidget(ocr_btn)
+
+        # Diagnostics icon
+        diag_btn = IconButton("ℹ", "Document Diagnostics & Health", size=24)
+        diag_btn.clicked.connect(lambda chk=False, did=doc.id: self._open_document_diagnostics(did))
+        title_row.addWidget(diag_btn)
+
         # Delete icon
         del_btn = IconButton("🗑", "Remove document", size=24)
         del_btn.clicked.connect(lambda chk=False, did=doc.id: self._on_delete_doc(did))
@@ -705,7 +731,10 @@ class PdfScreen(QWidget):
 
         badge_variant = "success" if doc.status == "ready" else ("warning" if doc.status == "indexing" else "error")
         badge_text = "Ready" if doc.status == "ready" else ("Indexing" if doc.status == "indexing" else "Error")
-        if doc.error_message and "Scanned" in doc.error_message:
+        if doc.status == "ocr_pending_review":
+            badge_text = "OCR Review"
+            badge_variant = "warning"
+        elif doc.error_message and "Scanned" in doc.error_message:
             badge_text = "Scanned"
             badge_variant = "warning"
 
@@ -769,6 +798,42 @@ class PdfScreen(QWidget):
             return
 
         self._start_ingestion(paths)
+
+    def _on_import_image_clicked(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Student Notes / Photographs",
+            "",
+            "Image Files (*.png *.jpg *.jpeg *.webp)",
+        )
+        if not paths:
+            return
+
+        for p in paths:
+            try:
+                doc = self._ocr_service.import_image_note(p)
+                self._load_document_list()
+                self._open_ocr_review(doc.id)
+            except Exception as exc:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(self, "Import Error", f"Failed to import image note: {exc}")
+
+    def _open_ocr_review(self, doc_id: int):
+        dlg = OCRReviewDialog(self._ocr_service, doc_id, page_number=1, parent=self)
+        dlg.indexing_completed.connect(lambda count: self._load_document_list())
+        dlg.exec()
+        self._load_document_list()
+
+    def _open_document_diagnostics(self, doc_id: int):
+        from pagepilot.screens.document_diagnostics_dialog import DocumentDiagnosticsDialog
+        dlg = DocumentDiagnosticsDialog(
+            doc_id=doc_id,
+            doc_db=self._doc_db,
+            ingestion_service=self._ingestion_service,
+            parent=self,
+        )
+        dlg.reindexed.connect(lambda _: self._load_document_list())
+        dlg.exec()
 
     def _start_ingestion(self, file_paths: list[str]):
         self._import_btn.setEnabled(False)

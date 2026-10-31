@@ -148,7 +148,14 @@ class RecorderThread(QThread):
                 frames.append(self._q.get_nowait())
 
         except Exception as exc:
-            self.error_occurred.emit(f"Recording failed: {exc}")
+            err_str = str(exc)
+            if "permission" in err_str.lower() or "access" in err_str.lower():
+                msg = f"Microphone access denied: {exc}. Please check Windows Privacy Settings."
+            elif "device unavailable" in err_str.lower() or "busy" in err_str.lower():
+                msg = f"Microphone is busy or already in use: {exc}."
+            else:
+                msg = f"Recording failed: {exc}"
+            self.error_occurred.emit(msg)
             self.state_changed.emit("error")
             return
 

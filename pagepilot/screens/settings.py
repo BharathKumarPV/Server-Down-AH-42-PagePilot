@@ -7,6 +7,7 @@ Status is fetched in a background thread — never faked.
 
 from __future__ import annotations
 
+import os
 import platform
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ from pagepilot.config import (
     DB_PATH, DOCS_DB_PATH, CHROMA_DIR, EMBED_MODEL,
     MODEL_NAME, NUM_CTX, OLLAMA_HOST, REQUEST_TIMEOUT,
     WHISPER_MODEL_DIR, PIPER_VOICE_DIR, DOCX_OUTPUT_DIR,
+    OCR_MODELS_DIR,
 )
 from pagepilot.theme import Colors, Fonts, Radius, Spacing
 from pagepilot.ui.components import Badge, Card, Divider, InfoRow, SectionLabel
@@ -77,6 +79,7 @@ class SettingsScreen(QWidget):
         body_layout.addWidget(self._build_ai_card())
         body_layout.addWidget(VoiceSettingsCard())
         body_layout.addWidget(self._build_pdf_card())
+        body_layout.addWidget(self._build_accessibility_card())
         body_layout.addWidget(self._build_roadmap_card())
         body_layout.addWidget(self._build_storage_card())
         body_layout.addWidget(self._build_system_card())
@@ -262,6 +265,63 @@ class SettingsScreen(QWidget):
         layout.addWidget(InfoRow("Citation Fidelity", "Verified 1-based page metadata"))
         return card
 
+    # ── Accessibility & Performance card ─────────────────────────────
+
+    def _build_accessibility_card(self) -> Card:
+        from pagepilot import config
+        card = Card(title="Accessibility & UI Performance")
+        layout = card.body_layout()
+
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        r_layout = QHBoxLayout(row)
+        r_layout.setContentsMargins(0, 0, 0, 0)
+
+        info = QVBoxLayout()
+        info.setSpacing(2)
+        lbl = QLabel("Reduced Motion")
+        lbl.setFont(Fonts.make(Fonts.SIZE_SM, QFont.Weight.DemiBold))
+        lbl.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+        desc = QLabel("Disable non-essential transitions and auto-scroll snapping for maximum laptop responsiveness.")
+        desc.setFont(Fonts.make(Fonts.SIZE_XS))
+        desc.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
+        desc.setWordWrap(True)
+        info.addWidget(lbl)
+        info.addWidget(desc)
+        r_layout.addLayout(info, 1)
+
+        toggle_btn = QPushButton("Enabled" if config.REDUCED_MOTION else "Disabled")
+        toggle_btn.setCheckable(True)
+        toggle_btn.setChecked(config.REDUCED_MOTION)
+        toggle_btn.setFixedWidth(90)
+        toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        def _update_style(active: bool):
+            if active:
+                toggle_btn.setText("Enabled")
+                toggle_btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {Colors.ACCENT}; color: white; "
+                    f"border-radius: 4px; padding: 4px 8px; font-weight: bold; border: none; }}"
+                )
+            else:
+                toggle_btn.setText("Disabled")
+                toggle_btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {Colors.BG_SURFACE}; color: {Colors.TEXT_MUTED}; "
+                    f"border: 1px solid {Colors.BORDER}; border-radius: 4px; padding: 4px 8px; }}"
+                )
+
+        _update_style(config.REDUCED_MOTION)
+
+        def _on_toggle(checked: bool):
+            config.REDUCED_MOTION = checked
+            os.environ["PAGEPILOT_REDUCED_MOTION"] = "1" if checked else "0"
+            _update_style(checked)
+
+        toggle_btn.toggled.connect(_on_toggle)
+        r_layout.addWidget(toggle_btn)
+        layout.addWidget(row)
+        return card
+
     # ── Roadmap card ─────────────────────────────────────────────────
 
     def _build_roadmap_card(self) -> Card:
@@ -299,7 +359,7 @@ class SettingsScreen(QWidget):
         layout.addWidget(feature_row("PDF Processing",       "Active",          "success", "Stage 4 — PyMuPDF + ChromaDB + nomic-embed-text"))
         layout.addWidget(feature_row("DOCX Generation",      "Active",          "success", "Stage 5 — python-docx + 5 templates + citations"))
         layout.addWidget(feature_row("Multi-Doc Reasoning",  "Active",          "success", "Stage 6A — Faithful to Every Sentence (Cross-Doc & Claim Verifier)"))
-        layout.addWidget(feature_row("Handwriting & Math",   "Not Implemented", "default", "Planned — Stage 6B"))
+        layout.addWidget(feature_row("Handwriting & Math",   "Active",          "success", "Stage 6B — PaddleOCR + Pix2Text Formula Recognition"))
         layout.addWidget(feature_row("Android Application",  "Not Implemented", "default", "Planned — Future"))
         layout.addWidget(feature_row("Offline Maps",         "Not Implemented", "default", "Planned — Future"))
         return card
@@ -325,6 +385,7 @@ class SettingsScreen(QWidget):
         layout.addWidget(InfoRow("DOCX Output",       str(DOCX_OUTPUT_DIR)))
         layout.addWidget(InfoRow("Whisper Models",    str(WHISPER_MODEL_DIR)))
         layout.addWidget(InfoRow("Piper Voices",      str(PIPER_VOICE_DIR)))
+        layout.addWidget(InfoRow("OCR Models",        str(OCR_MODELS_DIR)))
         layout.addWidget(InfoRow("Ollama Models",     "Managed by Ollama runtime"))
         layout.addWidget(InfoRow("Map Tiles",         "None — Stage 7"))
         return card

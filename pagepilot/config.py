@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "PagePilot"
-APP_VERSION = "0.6.0-stage6a"
+APP_VERSION = "0.6.1-stage6b"
 APP_DESCRIPTION = "Offline-first AI assistant"
 APP_AUTHOR = "PagePilot Team"
 
@@ -103,6 +103,30 @@ def ensure_docx_dir() -> Path:
     """Create the PagePilot documents output directory if it does not exist."""
     DOCX_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     return DOCX_OUTPUT_DIR
+
+# ──────────────────────────────────────────────
+# OCR & Mathematical Formula / Stage 6B configuration
+# ──────────────────────────────────────────────
+OCR_MODELS_DIR       = _APP_DATA_DIR / "models" / "ocr"
+OCR_PADDLE_DIR       = OCR_MODELS_DIR / "paddle"
+OCR_PIX2TEXT_DIR     = OCR_MODELS_DIR / "pix2text"
+OCR_CACHE_DIR        = _APP_DATA_DIR / "cache" / "ocr"
+OCR_WORKER_TIMEOUT   = int(os.environ.get("PAGEPILOT_OCR_TIMEOUT", "180"))  # seconds
+
+def ensure_ocr_dirs() -> dict[str, Path]:
+    for p in (OCR_MODELS_DIR, OCR_PADDLE_DIR, OCR_PIX2TEXT_DIR, OCR_CACHE_DIR):
+        p.mkdir(parents=True, exist_ok=True)
+    return {
+        "models": OCR_MODELS_DIR,
+        "paddle": OCR_PADDLE_DIR,
+        "pix2text": OCR_PIX2TEXT_DIR,
+        "cache": OCR_CACHE_DIR,
+    }
+
+# ──────────────────────────────────────────────
+# Accessibility & UI Performance
+# ──────────────────────────────────────────────
+REDUCED_MOTION: bool = os.environ.get("PAGEPILOT_REDUCED_MOTION", "0") in ("1", "true", "True")
 
 # ──────────────────────────────────────────────
 # Navigation item IDs  (used as page keys in stacked widget)

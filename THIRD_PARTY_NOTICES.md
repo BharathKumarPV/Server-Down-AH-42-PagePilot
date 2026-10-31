@@ -122,3 +122,40 @@ Piper voice models (`.onnx` and `.onnx.json`) are developed independently and ho
 * **Copyright:** © 2004 Stefan Behnel, Martijn Faassen and contributors
 * **Usage in PagePilot:** High-performance XML processing underlying python-docx for OpenXML document manipulation.
 * Permissive BSD license allows distribution and use in source and binary forms with copyright notice retention.
+
+---
+
+## 11. PaddleOCR & PaddlePaddle (Stage 6B)
+
+* **Project:** [PaddlePaddle/PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
+* **Framework:** [PaddlePaddle/Paddle](https://github.com/PaddlePaddle/Paddle)
+* **License:** **Apache License 2.0**
+* **Copyright:** © 2020–2025 PaddlePaddle Authors
+* **Usage in PagePilot:** Offline text detection and recognition for printed documents and handwritten student notes via PP-OCRv5 architectures. Runs in an isolated Python 3.12 subprocess worker (`.venv-ocr/`) to maintain compatibility with the primary Python 3.14 desktop runtime.
+* **Model Assets:**
+  - `ch_PP-OCRv5_det` (Text line detection): Apache-2.0
+  - `en_PP-OCRv5_rec` (English text recognition): Apache-2.0
+  - `ch_PP-OCRv5_server_rec` (Server handwriting recognition): Apache-2.0
+* **Distribution Policy:** Large pre-trained weight files are downloaded on-demand by user action and stored in `%APPDATA%\PagePilot\models\ocr\paddle\`. Weights are never committed to the Git repository.
+
+---
+
+## 12. Pix2Text & Formula Recognition (Stage 6B)
+
+* **Project:** [breezedeus/Pix2Text](https://github.com/breezedeus/Pix2Text)
+* **Author:** © 2022–2025 Breezedeus
+* **License:** **MIT License**
+* **Usage in PagePilot:** Mathematical Formula Detection (MFD) and Mathematical Formula Recognition (MFR), converting formula image regions into structured, editable LaTeX expressions.
+* **Component Model Licenses:**
+  - Mathematical Formula Detection (`mfd-1.5` / `doclayout-yolo`): Apache-2.0 / GPL dual-consideration; runs as an isolated subprocess.
+  - Mathematical Formula Recognition (`mfr-1.5` / `LaTeX-OCR`): MIT License (Lukas Blecher).
+* **Distribution Policy:** Formula weights reside in `%APPDATA%\PagePilot\models\ocr\pix2text\` outside version control.
+
+---
+
+## 13. ONNX Runtime (Stage 6B)
+
+* **Project:** [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime)
+* **License:** **MIT License**
+* **Copyright:** © Microsoft Corporation
+* **Usage in PagePilot:** High-efficiency CPU inference for formula detection and recognition models within the isolated OCR worker environment.

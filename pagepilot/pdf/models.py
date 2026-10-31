@@ -10,6 +10,18 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+# Document Status States
+DOC_STATUS_IMPORTED             = "imported"
+DOC_STATUS_EXTRACTING           = "extracting"
+DOC_STATUS_EXTRACTED            = "extracted"
+DOC_STATUS_EMBEDDING            = "embedding"
+DOC_STATUS_INDEXING             = "indexing"
+DOC_STATUS_READY                = "ready"
+DOC_STATUS_PARTIALLY_INDEXED    = "partially_indexed"
+DOC_STATUS_SCANNED_OCR_REQUIRED = "scanned_ocr_required"
+DOC_STATUS_FAILED               = "failed"
+
+
 @dataclass
 class Document:
     """Represents a PDF document imported into PagePilot."""
@@ -19,10 +31,15 @@ class Document:
     sha256_hash: str
     page_count: int
     import_time: str
-    status: str          # 'pending' | 'indexing' | 'ready' | 'error'
+    status: str          # 'imported' | 'extracting' | 'extracted' | 'embedding' | 'indexing' | 'ready' | 'partially_indexed' | 'scanned_ocr_required' | 'failed'
     embed_model: str
     chunk_count: int = 0
     error_message: str = ""
+    extracted_pages_count: int = 0
+    scanned_pages_count: int = 0
+    char_count: int = 0
+    embedded_chunks_count: int = 0
+    indexed_pages_count: int = 0
 
 
 @dataclass

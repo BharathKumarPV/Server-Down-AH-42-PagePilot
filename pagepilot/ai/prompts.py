@@ -95,6 +95,95 @@ def build_summarize_section_prompt(filename: str, page_number: int, text: str) -
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Code Explanation & Hierarchical Summarization Prompts
+# ──────────────────────────────────────────────────────────────────────────────
+
+CODE_EXPLANATION_SYSTEM_PROMPT = (
+    "You are PagePilot Code Specialist, an offline AI assistant that analyzes and explains programming code "
+    "extracted strictly from documents.\n\n"
+    "CRITICAL RULES:\n"
+    "1. Preserve the exact code extracted from the document. Do not invent or fabricate code not in the excerpts.\n"
+    "2. Explain the high-level purpose of the code.\n"
+    "3. Walk through important blocks, statements, and logic step-by-step.\n"
+    "4. Explain inputs, outputs, data types, and dependencies.\n"
+    "5. Explain execution flow.\n"
+    "6. Cite the exact source pages using [filename, p. N]."
+)
+
+
+def build_code_explanation_prompt(question: str, chunks: list[Chunk]) -> str:
+    """Format code passages with anti-injection fences and code explanation instructions."""
+    if not chunks:
+        context_block = "(No code excerpts found in selected documents.)"
+    else:
+        passages: list[str] = []
+        for idx, chunk in enumerate(chunks, 1):
+            heading_info = f" - {chunk.section_heading}" if chunk.section_heading else ""
+            passages.append(
+                f"--- BEGIN CODE EXCERPT {idx} [Source: {chunk.filename}, Page {chunk.page_number}{heading_info}] ---\n"
+                f"{chunk.text.strip()}\n"
+                f"--- END CODE EXCERPT {idx} ---"
+            )
+        context_block = "\n\n".join(passages)
+
+    return (
+        f"Document Code Excerpts:\n"
+        f"{context_block}\n\n"
+        f"User Request: {question.strip()}\n\n"
+        f"Provide a comprehensive, in-depth explanation of the code above. "
+        f"Preserve the code syntax, explain its purpose, detail line/block execution, inputs and outputs, "
+        f"and cite source pages as [filename, p. N]:"
+    )
+
+
+SUMMARIZE_HIERARCHICAL_SYSTEM_PROMPT = (
+    "You are PagePilot Document Assistant. Your task is to produce a comprehensive, structured, "
+    "evidence-grounded document summary from section-by-section excerpts.\n"
+    "Requirements:\n"
+    "1. Structure your summary with clear sections:\n"
+    "   - Overview & Document Scope\n"
+    "   - Key Findings & Core Concepts\n"
+    "   - Section & Page Breakdown\n"
+    "   - Practical Takeaways / Summary\n"
+    "2. Cite source page numbers throughout using [filename, p. N] or [pp. X-Y].\n"
+    "3. Do not invent facts or include external assumptions beyond the provided text."
+)
+
+
+def build_hierarchical_summary_prompt(filename: str, section_notes: list[dict]) -> str:
+    """Combine page/section excerpts into a structured hierarchical summary prompt."""
+    sections_formatted = []
+    for s in section_notes:
+        pages = s.get("pages_label", "")
+        text = s.get("text", "").strip()
+        sections_formatted.append(f"### Section [{filename}, {pages}]\n{text}")
+    sections_block = "\n\n".join(sections_formatted)
+    return (
+        f"Document: {filename}\n\n"
+        f"Section Excerpts:\n{sections_block}\n\n"
+        f"Produce a complete, structured summary of '{filename}' based on the sections above, "
+        f"with exact page citations [p. N] for every major topic:"
+    )
+
+
+def build_multi_doc_summary_prompt(doc_summaries: list[dict]) -> str:
+    """Prompt for synthesizing multi-document summaries with cross-document overview."""
+    blocks = []
+    for d in doc_summaries:
+        fname = d["filename"]
+        sum_text = d["summary"].strip()
+        blocks.append(f"=== DOCUMENT: {fname} ===\n{sum_text}")
+    combined_blocks = "\n\n".join(blocks)
+    return (
+        f"Individual Document Summaries:\n\n{combined_blocks}\n\n"
+        f"Please provide:\n"
+        f"1. A separate structured summary for each document.\n"
+        f"2. A combined cross-document overview explaining how the documents connect, compare, or complement each other.\n"
+        f"3. Clear citations indicating which document and page each fact comes from."
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Stage 6A: Structured Claim Generation Prompts & Parsing
 # ──────────────────────────────────────────────────────────────────────────────
 

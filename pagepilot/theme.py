@@ -35,6 +35,7 @@ class Colors:
     # Text
     TEXT_PRIMARY    = "#F0F2F8"
     TEXT_SECONDARY  = "#9198AE"
+    TEXT_MUTED      = "#9198AE"
     TEXT_DISABLED   = "#555B6E"
     TEXT_ON_ACCENT  = "#FFFFFF"
 

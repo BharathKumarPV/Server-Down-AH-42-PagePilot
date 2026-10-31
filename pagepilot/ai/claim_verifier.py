@@ -91,14 +91,17 @@ class ClaimVerifier:
             return claim
 
         # Rule 3: Check numeric / quantitative assertions
-        claim_numbers = _extract_numbers(claim.text)
+        # Clean out structural page and section references (e.g. "p. 1", "page 2", "section 3")
+        cleaned_claim_text = re.sub(r"\b(?:p\.|page|section|step|item|figure|table)\s*\d+\b", "", claim.text, flags=re.IGNORECASE)
+        claim_numbers = _extract_numbers(cleaned_claim_text)
         evidence_numbers = _extract_numbers(combined_evidence_text)
         for num in claim_numbers:
-            if num not in evidence_numbers:
-                # If claim states a specific number not found in evidence, check if contradictory
-                claim.verification_status = VerificationStatus.CONTRADICTED
-                claim.verification_notes = f"Numerical value '{num}' is not substantiated by cited evidence."
-                return claim
+            # Only check significant quantities (>9 or with metric units like %, ms, kb, mb, gb)
+            if re.search(r"[%a-zA-Z]", num) or (num.isdigit() and int(num) > 9):
+                if num not in evidence_numbers:
+                    claim.verification_status = VerificationStatus.CONTRADICTED if evidence_numbers else VerificationStatus.INSUFFICIENT_EVIDENCE
+                    claim.verification_notes = f"Numerical value '{num}' is not substantiated by cited evidence."
+                    return claim
 
         # Rule 4: Negation conflict check
         claim_words = set(re.findall(r"\b\w+\b", claim.text.lower()))

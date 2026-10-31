@@ -18,26 +18,38 @@ import os
 import re
 import textwrap
 from datetime import datetime
+from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QSize, QTimer
+from PySide6.QtCore import Qt, Signal, QSize, QTimer, QThread
 from PySide6.QtGui import QFont, QKeyEvent, QCursor, QClipboard
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel,
+    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QScrollArea, QSizePolicy,
     QTextEdit, QVBoxLayout, QWidget,
 )
 
 from pagepilot.ai.ollama_client import ChatMessage, OllamaClient, OllamaError, OllamaStatus
 from pagepilot.ai.worker import InferenceWorker
+from pagepilot.ai.rag_service import RAGService, RAGWorker
 from pagepilot.config import (
-    MODEL_NAME, NUM_CTX, OLLAMA_HOST, REQUEST_TIMEOUT,
+    DOCS_DB_PATH, EMBED_MODEL, MODEL_NAME, NUM_CTX, OLLAMA_HOST, REQUEST_TIMEOUT,
     SYSTEM_PROMPT, MAX_HISTORY_MESSAGES,
     WHISPER_MODEL, WHISPER_LANGUAGE, PIPER_VOICE, PIPER_AUTO_SPEAK,
+    ensure_chroma_dir,
 )
-from pagepilot.db.database import ConversationDB, Message
+from pagepilot.db.database import ConversationDB, DocumentDB, Message
+from pagepilot.pdf.ingestion_service import IngestionService
+from pagepilot.pdf.citation import open_pdf_document
+from pagepilot.pdf.models import Citation, Document
+from pagepilot.ocr.service import OCRService
+from pagepilot.screens.ocr_review_dialog import OCRReviewDialog
+from pagepilot.retrieval.embedding_client import EmbeddingClient
+from pagepilot.retrieval.hybrid_retriever import HybridRetriever
+from pagepilot.retrieval.keyword_search import KeywordSearch
+from pagepilot.retrieval.vector_store import VectorStore
 from pagepilot.theme import Colors, Fonts, Radius, Spacing
 from pagepilot.ui.components import IconButton, PlannedBanner
-from pagepilot.voice.recorder import RecorderThread
+from pagepilot.voice.recorder import RecorderThread, list_input_devices
 from pagepilot.voice.whisper import TranscriptionThread, is_model_installed as is_whisper_installed
 from pagepilot.voice.tts import TtsThread, is_voice_installed
 
@@ -198,6 +210,12 @@ class MessageWidget(QFrame):
         self._content = content
         self._msg_id  = msg_id
         self._streaming = False
+        self._citations_widget: QWidget | None = None
+
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._flush_render)
+        self._has_pending_render = False
 
         is_user = role == "user"
         self.setObjectName("MsgUser" if is_user else "MsgAssistant")
@@ -238,6 +256,8 @@ class MessageWidget(QFrame):
         b_layout = QVBoxLayout(bubble)
         b_layout.setContentsMargins(Spacing.LG, Spacing.MD, Spacing.LG, Spacing.MD)
         b_layout.setSpacing(6)
+        self._bubble_layout = b_layout
+        self._citations_widget: QWidget | None = None
 
         # Role header
         header_row = QWidget()
@@ -367,18 +387,28 @@ class MessageWidget(QFrame):
                 )
 
     def _adjust_browser_height(self):
-        doc_height = int(self._browser.document().size().height()) + 4
-        self._browser.setFixedHeight(max(doc_height, 20))
+        if hasattr(self, "_browser"):
+            doc_height = int(self._browser.document().size().height()) + 4
+            self._browser.setFixedHeight(max(doc_height, 20))
+
+    def _flush_render(self):
+        if self._has_pending_render and self._role != "user" and hasattr(self, "_browser"):
+            self._has_pending_render = False
+            self._browser.setHtml(_md_to_html(self._content))
+            self._adjust_browser_height()
 
     # ── Public API ────────────────────────────────────────────────────
 
     def append_token(self, token: str):
-        """Append a streaming token (assistant only)."""
+        """Append a streaming token with throttled rendering for responsive UI."""
         self._content += token
-        self._browser.setHtml(_md_to_html(self._content))
-        self._adjust_browser_height()
+        self._has_pending_render = True
+        if not self._render_timer.isActive():
+            self._render_timer.start(50)  # Smooth 50ms batching (~20 FPS)
 
     def set_content(self, text: str):
+        self._render_timer.stop()
+        self._has_pending_render = False
         self._content = text
         if self._role == "user":
             self._text_lbl.setText(text)
@@ -388,6 +418,9 @@ class MessageWidget(QFrame):
 
     def set_streaming(self, streaming: bool):
         self._streaming = streaming
+        if not streaming:
+            self._render_timer.stop()
+            self._flush_render()
         if hasattr(self, "_regen_btn"):
             self._regen_btn.setEnabled(not streaming)
         if hasattr(self, "_speak_btn"):
@@ -404,6 +437,47 @@ class MessageWidget(QFrame):
                 f"font-size:{Fonts.SIZE_BASE}px'>{msg}</p>"
             )
             self._adjust_browser_height()
+
+    def set_citations(self, citations: list):
+        """Display clickable source pills below assistant response."""
+        if not citations or self._citations_widget is not None:
+            return
+
+        self._citations_widget = QWidget()
+        self._citations_widget.setStyleSheet("background: transparent;")
+        c_layout = QHBoxLayout(self._citations_widget)
+        c_layout.setContentsMargins(0, 4, 0, 2)
+        c_layout.setSpacing(6)
+        c_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        lbl = QLabel("Sources:")
+        lbl.setStyleSheet(f"color: {Colors.TEXT_DISABLED}; font-size: 11px; font-weight: 600; background: transparent; border: none;")
+        c_layout.addWidget(lbl)
+
+        for cit in citations:
+            fname = getattr(cit, "filename", "Document")
+            pnum = getattr(cit, "page_number", 1)
+            pill = QPushButton(f"📄 {fname}, p. {pnum}")
+            pill.setFixedHeight(24)
+            pill.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            chunk_preview = getattr(cit, "chunk_text", "")[:120]
+            pill.setToolTip(f"Open {fname} at page {pnum}\nPreview: {chunk_preview}…")
+            pill.setStyleSheet(
+                f"QPushButton {{ background: {Colors.BG_ELEVATED}; color: {Colors.TEXT_SECONDARY}; "
+                f"border: 1px solid {Colors.BORDER}; border-radius: 12px; padding: 2px 8px; font-size: 11px; }}"
+                f"QPushButton:hover {{ background: {Colors.ACCENT_MUTED}; color: {Colors.ACCENT}; border-color: {Colors.ACCENT}; }}"
+            )
+            pill.clicked.connect(lambda _, p=pnum: open_pdf_document("", page_number=p))
+            c_layout.addWidget(pill)
+
+        if hasattr(self, "_action_bar") and hasattr(self, "_bubble_layout"):
+            idx = self._bubble_layout.indexOf(self._action_bar)
+            if idx >= 0:
+                self._bubble_layout.insertWidget(idx, self._citations_widget)
+            else:
+                self._bubble_layout.addWidget(self._citations_widget)
+        elif hasattr(self, "_bubble_layout"):
+            self._bubble_layout.addWidget(self._citations_widget)
 
     def _on_copy(self):
         QApplication.clipboard().setText(self._content)
@@ -468,8 +542,11 @@ class ConversationArea(QScrollArea):
                 return w
         return None
 
-    def _scroll_to_bottom(self):
-        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+    def _scroll_to_bottom(self, force: bool = False):
+        sb = self.verticalScrollBar()
+        # If force is True or user is already near bottom (<= 80px), follow stream
+        if force or (sb.maximum() - sb.value() <= 80):
+            sb.setValue(sb.maximum())
 
     @property
     def message_count(self) -> int:
@@ -515,14 +592,168 @@ class _ComposerInput(QTextEdit):
         super().keyPressEvent(event)
 
 
-class Composer(QFrame):
-    """Rounded bottom composer bar with Stage 3 voice input controls."""
+class AttachmentChip(QFrame):
+    """
+    Visual attachment pill shown inside Composer.
+    Supports PDF documents and note images.
+    Displays: icon, filename, status (ingesting/ready/pending/failed), review action (if image), and remove button.
+    """
+    remove_clicked = Signal(str)  # file_path
+    action_clicked = Signal(str)  # file_path (e.g. Review OCR)
+    diagnostics_clicked = Signal(int)  # doc_id
 
-    send_requested          = Signal(str)
-    stop_requested          = Signal()
-    record_start_requested  = Signal()
-    record_stop_requested   = Signal()
-    record_cancel_requested = Signal()
+    def __init__(
+        self,
+        file_path: str,
+        doc_type: str = "pdf",
+        status: str = "ready",
+        status_text: str = "",
+        doc_id: Optional[int] = None,
+        page_count: int = 1,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.doc_type = doc_type
+        self.status = status
+        self.doc_id = doc_id
+        self.page_count = page_count
+
+        self.setObjectName("AttachmentChip")
+        self.setStyleSheet(
+            f"QFrame#AttachmentChip {{ background: {Colors.BG_ELEVATED}; "
+            f"border: 1px solid {Colors.BORDER}; border-radius: {Radius.MD}px; "
+            f"padding: 2px 6px; }}"
+        )
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 2, 6, 2)
+        layout.setSpacing(6)
+
+        # Icon
+        icon_str = "📄" if doc_type == "pdf" else "📷"
+        self._icon_lbl = QLabel(icon_str)
+        self._icon_lbl.setStyleSheet("font-size: 13px; background: transparent; border: none;")
+        layout.addWidget(self._icon_lbl)
+
+        # Truncated Filename
+        fname = Path(file_path).name
+        disp_name = fname if len(fname) <= 24 else fname[:12] + "…" + fname[-9:]
+        self._name_lbl = QLabel(disp_name)
+        self._name_lbl.setToolTip(f"{fname}\nPath: {file_path}")
+        self._name_lbl.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; font-size: {Fonts.SIZE_XS}px; "
+            f"font-weight: 600; background: transparent; border: none;"
+        )
+        layout.addWidget(self._name_lbl)
+
+        # Status Label
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet(
+            f"font-size: 10px; background: transparent; border: none;"
+        )
+        layout.addWidget(self._status_lbl)
+
+        # Action Button (Review OCR for images)
+        self._action_btn = QPushButton("🔍 Review")
+        self._action_btn.setFixedHeight(20)
+        self._action_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._action_btn.setStyleSheet(
+            f"QPushButton {{ background: {Colors.ACCENT}; color: white; "
+            f"font-size: 10px; font-weight: 600; border: none; border-radius: 4px; padding: 1px 6px; }}"
+            f"QPushButton:hover {{ background: {Colors.ACCENT_HOVER}; }}"
+        )
+        self._action_btn.clicked.connect(lambda: self.action_clicked.emit(self.file_path))
+        self._action_btn.hide()
+        layout.addWidget(self._action_btn)
+
+        # Diagnostics 'ℹ' button (for PDFs)
+        self._diag_btn = QPushButton("ℹ")
+        self._diag_btn.setFixedSize(18, 18)
+        self._diag_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._diag_btn.setToolTip("View Document Diagnostics & Status")
+        self._diag_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {Colors.TEXT_MUTED}; "
+            f"font-size: 11px; font-weight: bold; border: 1px solid {Colors.BORDER}; border-radius: 9px; padding: 0px; }}"
+            f"QPushButton:hover {{ color: {Colors.ACCENT}; border-color: {Colors.ACCENT}; background: {Colors.BG_SURFACE}; }}"
+        )
+        self._diag_btn.clicked.connect(self._on_diag_click)
+        if doc_type != "pdf" or self.doc_id is None:
+            self._diag_btn.hide()
+        layout.addWidget(self._diag_btn)
+
+        # Remove '✕' button
+        self._remove_btn = QPushButton("✕")
+        self._remove_btn.setFixedSize(16, 16)
+        self._remove_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._remove_btn.setToolTip("Remove attachment")
+        self._remove_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {Colors.TEXT_DISABLED}; "
+            f"font-size: 10px; border: none; border-radius: 8px; }}"
+            f"QPushButton:hover {{ color: {Colors.ERROR}; background: rgba(255, 100, 100, 0.2); }}"
+        )
+        self._remove_btn.clicked.connect(lambda: self.remove_clicked.emit(self.file_path))
+        layout.addWidget(self._remove_btn)
+
+        self.update_status(status, status_text, doc_id, page_count)
+
+    def _on_diag_click(self):
+        if self.doc_id is not None:
+            self.diagnostics_clicked.emit(self.doc_id)
+
+    def update_status(
+        self,
+        status: str,
+        status_text: str = "",
+        doc_id: Optional[int] = None,
+        page_count: int = 1,
+    ):
+        self.status = status
+        if doc_id is not None:
+            self.doc_id = doc_id
+        self.page_count = page_count
+
+        if hasattr(self, "_diag_btn"):
+            if self.doc_type == "pdf" and self.doc_id is not None:
+                self._diag_btn.show()
+            else:
+                self._diag_btn.hide()
+
+        if status == "ingesting":
+            self._status_lbl.setText("⏳ Ingesting…")
+            self._status_lbl.setStyleSheet(f"color: {Colors.WARNING}; font-size: 10px; background: transparent; border: none;")
+            self._action_btn.hide()
+        elif status == "ready":
+            txt = status_text or (f"✓ {self.page_count}p" if self.doc_type == "pdf" else "✓ Ready")
+            self._status_lbl.setText(txt)
+            self._status_lbl.setStyleSheet(f"color: {Colors.SUCCESS}; font-size: 10px; background: transparent; border: none;")
+            self._action_btn.hide()
+        elif status == "pending_review":
+            self._status_lbl.setText("Pending Review")
+            self._status_lbl.setStyleSheet(f"color: {Colors.WARNING}; font-size: 10px; background: transparent; border: none;")
+            self._action_btn.show()
+        elif status == "error":
+            self._status_lbl.setText("⚠️ Failed")
+            self._status_lbl.setStyleSheet(f"color: {Colors.ERROR}; font-size: 10px; background: transparent; border: none;")
+            self._action_btn.hide()
+        else:
+            self._status_lbl.setText(status_text)
+            self._action_btn.hide()
+
+
+class Composer(QFrame):
+    """Rounded bottom composer bar with Stage 3 voice input controls and file attachment support."""
+
+    send_requested               = Signal(str)
+    stop_requested               = Signal()
+    record_start_requested       = Signal()
+    record_stop_requested        = Signal()
+    record_cancel_requested      = Signal()
+    attachment_requested         = Signal()
+    attachment_remove_requested  = Signal(str)
+    attachment_action_requested  = Signal(str)
+    attachment_diagnostics_requested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -533,10 +764,22 @@ class Composer(QFrame):
         )
         self._is_recording = False
         self._is_processing_voice = False
+        self._attachments: dict[str, dict] = {}
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(Spacing.LG, 4, Spacing.MD, 4)
-        outer.setSpacing(0)
+        outer.setContentsMargins(Spacing.LG, 6, Spacing.MD, 6)
+        outer.setSpacing(Spacing.XS)
+
+        # Attachments container (horizontal layout above input)
+        self._attachments_container = QWidget()
+        self._attachments_container.setObjectName("AttachmentsContainer")
+        self._attachments_container.setStyleSheet("background: transparent;")
+        self._attachments_layout = QHBoxLayout(self._attachments_container)
+        self._attachments_layout.setContentsMargins(0, 0, 0, 4)
+        self._attachments_layout.setSpacing(Spacing.SM)
+        self._attachments_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._attachments_container.hide()
+        outer.addWidget(self._attachments_container)
 
         self._input = _ComposerInput()
         self._input.submit.connect(self.send_requested)
@@ -549,9 +792,18 @@ class Composer(QFrame):
         tb_l.setContentsMargins(0, 2, 0, 2)
         tb_l.setSpacing(Spacing.SM)
 
-        # Planned attachment btn
-        attach_btn = self._icon_btn("📎", "Attachments — planned in Stage 4")
-        attach_btn.setEnabled(False)
+        # Attachment button (Paperclip)
+        self._attach_btn = QPushButton("📎")
+        self._attach_btn.setFixedSize(30, 30)
+        self._attach_btn.setToolTip("Attach document (PDF) or note image (PNG, JPG, WebP)")
+        self._attach_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._attach_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {Colors.TEXT_SECONDARY}; "
+            f"font-size: 15px; border: none; border-radius: 15px; }}"
+            f"QPushButton:hover {{ background: {Colors.BG_ELEVATED}; color: {Colors.TEXT_PRIMARY}; }}"
+            f"QPushButton:disabled {{ color: {Colors.BG_ELEVATED}; }}"
+        )
+        self._attach_btn.clicked.connect(self.attachment_requested.emit)
 
         # Microphone button (Stage 3)
         self._mic_btn = QPushButton("🎙")
@@ -582,7 +834,7 @@ class Composer(QFrame):
         )
         self._voice_status_lbl.hide()
 
-        tb_l.addWidget(attach_btn)
+        tb_l.addWidget(self._attach_btn)
         tb_l.addWidget(self._mic_btn)
         tb_l.addWidget(self._cancel_rec_btn)
         tb_l.addWidget(self._voice_status_lbl)
@@ -607,12 +859,15 @@ class Composer(QFrame):
     def _on_mic_clicked(self):
         if self._is_recording:
             self.record_stop_requested.emit()
+        elif self._is_processing_voice:
+            return
         else:
             self.record_start_requested.emit()
 
     def set_recording_state(self, state: str, detail: str = ""):
-        """state: 'idle' | 'recording' | 'processing' | 'error'"""
-        if state == "recording":
+        """state: 'idle' | 'recording' | 'processing' | 'transcribing' | 'error'"""
+        st = state.lower()
+        if st == "recording":
             self._is_recording = True
             self._is_processing_voice = False
             self._mic_btn.setEnabled(True)
@@ -626,7 +881,20 @@ class Composer(QFrame):
             self._cancel_rec_btn.show()
             self._voice_status_lbl.setText("🔴 Recording speech… click ⏹ to finish")
             self._voice_status_lbl.show()
-        elif state == "processing":
+        elif st == "processing":
+            self._is_recording = False
+            self._is_processing_voice = True
+            self._mic_btn.setEnabled(False)
+            self._mic_btn.setText("⏳")
+            self._mic_btn.setToolTip("Processing audio…")
+            self._mic_btn.setStyleSheet(
+                f"QPushButton {{ background: {Colors.BG_ELEVATED}; color: {Colors.TEXT_PRIMARY}; "
+                f"font-size: 14px; border: none; border-radius: 15px; }}"
+            )
+            self._cancel_rec_btn.hide()
+            self._voice_status_lbl.setText(detail or "Saving audio file…")
+            self._voice_status_lbl.show()
+        elif st == "transcribing":
             self._is_recording = False
             self._is_processing_voice = True
             self._mic_btn.setEnabled(False)
@@ -637,14 +905,14 @@ class Composer(QFrame):
                 f"font-size: 14px; border: none; border-radius: 15px; }}"
             )
             self._cancel_rec_btn.hide()
-            self._voice_status_lbl.setText("Transcribing with Whisper…")
+            self._voice_status_lbl.setText(detail or "Transcribing with Whisper…")
             self._voice_status_lbl.show()
-        elif state == "error":
+        elif st == "error":
             self._is_recording = False
             self._is_processing_voice = False
             self._mic_btn.setEnabled(True)
             self._mic_btn.setText("🎙")
-            self._mic_btn.setToolTip("Record voice input (Whisper)")
+            self._mic_btn.setToolTip("Voice error — click to retry")
             self._mic_btn.setStyleSheet(self._default_mic_style())
             self._cancel_rec_btn.hide()
             self._voice_status_lbl.setText(f"⚠ {detail}" if detail else "⚠ Voice error")
@@ -658,6 +926,104 @@ class Composer(QFrame):
             self._mic_btn.setStyleSheet(self._default_mic_style())
             self._cancel_rec_btn.hide()
             self._voice_status_lbl.hide()
+
+    def has_attachment(self, file_path: str) -> bool:
+        norm = os.path.normcase(os.path.abspath(file_path))
+        for p in self._attachments:
+            if os.path.normcase(os.path.abspath(p)) == norm:
+                return True
+        return False
+
+    def add_attachment(
+        self,
+        file_path: str,
+        doc_type: str = "pdf",
+        status: str = "ready",
+        status_text: str = "",
+        doc_id: Optional[int] = None,
+        page_count: int = 1,
+    ):
+        if self.has_attachment(file_path):
+            return
+        chip = AttachmentChip(
+            file_path=file_path,
+            doc_type=doc_type,
+            status=status,
+            status_text=status_text,
+            doc_id=doc_id,
+            page_count=page_count,
+            parent=self._attachments_container,
+        )
+        chip.remove_clicked.connect(self._on_chip_remove)
+        chip.action_clicked.connect(self.attachment_action_requested.emit)
+        chip.diagnostics_clicked.connect(self.attachment_diagnostics_requested.emit)
+        self._attachments[file_path] = {
+            "chip": chip,
+            "doc_type": doc_type,
+            "status": status,
+            "doc_id": doc_id,
+            "page_count": page_count,
+        }
+        self._attachments_layout.addWidget(chip)
+        self._attachments_container.show()
+
+    def update_attachment(
+        self,
+        file_path: str,
+        status: str,
+        status_text: str = "",
+        doc_id: Optional[int] = None,
+        page_count: int = 1,
+    ):
+        norm = os.path.normcase(os.path.abspath(file_path))
+        for p, data in self._attachments.items():
+            if os.path.normcase(os.path.abspath(p)) == norm:
+                data["status"] = status
+                if doc_id is not None:
+                    data["doc_id"] = doc_id
+                data["page_count"] = page_count
+                data["chip"].update_status(status, status_text, doc_id, page_count)
+                break
+
+    def remove_attachment(self, file_path: str):
+        norm = os.path.normcase(os.path.abspath(file_path))
+        target_key = None
+        for p in self._attachments:
+            if os.path.normcase(os.path.abspath(p)) == norm:
+                target_key = p
+                break
+        if target_key:
+            data = self._attachments.pop(target_key)
+            chip = data["chip"]
+            self._attachments_layout.removeWidget(chip)
+            chip.deleteLater()
+            if not self._attachments:
+                self._attachments_container.hide()
+
+    def _on_chip_remove(self, file_path: str):
+        self.remove_attachment(file_path)
+        self.attachment_remove_requested.emit(file_path)
+
+    def get_attachments(self) -> list[dict]:
+        res = []
+        for p, data in self._attachments.items():
+            res.append({
+                "file_path": p,
+                "doc_type": data["doc_type"],
+                "status": data["status"],
+                "doc_id": data["doc_id"],
+                "page_count": data["page_count"],
+                "filename": Path(p).name,
+            })
+        return res
+
+    def clear_attachments(self):
+        for p, data in list(self._attachments.items()):
+            chip = data["chip"]
+            self._attachments_layout.removeWidget(chip)
+            chip.deleteLater()
+        self._attachments.clear()
+        self._attachments_container.hide()
 
     def insert_text(self, text: str):
         """Append transcribed text into composer input for review and editing."""
@@ -727,6 +1093,8 @@ class Composer(QFrame):
         self._input.setReadOnly(generating)
         if hasattr(self, "_mic_btn"):
             self._mic_btn.setEnabled(not generating)
+        if hasattr(self, "_attach_btn"):
+            self._attach_btn.setEnabled(not generating)
 
     def clear(self):
         self._input.clear()
@@ -925,6 +1293,33 @@ class ConvListItem(QFrame):
 # Main Chat Screen
 # ──────────────────────────────────────────────────────────────────────────────
 
+class _AttachmentIngestionWorker(QThread):
+    """Background worker for PDF ingestion attached in chat composer."""
+    progress  = Signal(str, int, int)
+    completed = Signal(dict)
+    failed    = Signal(str, str)
+
+    def __init__(self, service: IngestionService, file_path: str, parent=None):
+        super().__init__(parent)
+        self.service = service
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            doc = self.service.ingest_pdf(
+                self.file_path,
+                progress_callback=lambda stage, cur, tot: self.progress.emit(stage, cur, tot)
+            )
+            self.completed.emit({
+                "file_path": self.file_path,
+                "doc_id": doc.id,
+                "page_count": doc.page_count,
+                "filename": doc.filename,
+            })
+        except Exception as exc:
+            self.failed.emit(self.file_path, str(exc))
+
+
 class ChatScreen(QWidget):
     """
     Full Stage 2 chat screen.
@@ -947,6 +1342,7 @@ class ChatScreen(QWidget):
         )
         self._db      = ConversationDB()
         self._worker: InferenceWorker | None = None
+        self._rag_worker: RAGWorker | None = None
         self._status_worker: _StatusWorker | None = None
         self._recorder: RecorderThread | None = None
         self._transcriber: TranscriptionThread | None = None
@@ -958,6 +1354,18 @@ class ChatScreen(QWidget):
         self._ollama_status = OllamaStatus()
         self._conv_items: dict[int, ConvListItem] = {}
 
+        # Lazy document and RAG services
+        self._doc_db: DocumentDB | None = None
+        self._vector_store: VectorStore | None = None
+        self._embedding_client: EmbeddingClient | None = None
+        self._keyword_search: KeywordSearch | None = None
+        self._hybrid_retriever: HybridRetriever | None = None
+        self._ingestion_service: IngestionService | None = None
+        self._ocr_service: OCRService | None = None
+        self._rag_service: RAGService | None = None
+        self._attachment_workers: list[_AttachmentIngestionWorker] = []
+        self._is_recording_active = False
+
         # Layout: sidebar | main
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -968,6 +1376,45 @@ class ChatScreen(QWidget):
 
         self._load_history_list()
         self._check_ollama_status()
+
+    def _get_ingestion_service(self) -> IngestionService:
+        if self._ingestion_service is None:
+            ensure_chroma_dir()
+            self._doc_db = DocumentDB(DOCS_DB_PATH)
+            self._vector_store = VectorStore()
+            self._embedding_client = EmbeddingClient(host=OLLAMA_HOST, model=EMBED_MODEL)
+            self._ingestion_service = IngestionService(
+                db=self._doc_db,
+                vector_store=self._vector_store,
+                embedding_client=self._embedding_client,
+            )
+        return self._ingestion_service
+
+    def _get_ocr_service(self) -> OCRService:
+        if self._ocr_service is None:
+            self._get_ingestion_service()
+            self._ocr_service = OCRService(
+                doc_db=self._doc_db,
+                vector_store=self._vector_store,
+                embedding_client=self._embedding_client,
+            )
+        return self._ocr_service
+
+    def _get_rag_service(self) -> RAGService:
+        if self._rag_service is None:
+            self._get_ingestion_service()
+            self._keyword_search = KeywordSearch(db=self._doc_db)
+            self._hybrid_retriever = HybridRetriever(
+                vector_store=self._vector_store,
+                keyword_search=self._keyword_search,
+                embedding_client=self._embedding_client,
+            )
+            self._rag_service = RAGService(
+                ollama_client=self._client,
+                hybrid_retriever=self._hybrid_retriever,
+                db=self._doc_db,
+            )
+        return self._rag_service
 
     # ──────────────────────────────────────────────────────────────
     # Build UI
@@ -1049,6 +1496,22 @@ class ChatScreen(QWidget):
         # Top bar
         layout.addWidget(self._build_top_bar())
 
+        # Active Document Context Banner
+        self._doc_context_banner = QFrame()
+        self._doc_context_banner.setStyleSheet(
+            f"background-color: {Colors.BG_SURFACE}; border-bottom: 1px solid {Colors.BORDER}; "
+            f"padding: 4px 16px;"
+        )
+        banner_layout = QHBoxLayout(self._doc_context_banner)
+        banner_layout.setContentsMargins(16, 4, 16, 4)
+        banner_layout.setSpacing(8)
+        self._doc_context_lbl = QLabel("")
+        self._doc_context_lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 11px; font-weight: 500;")
+        banner_layout.addWidget(self._doc_context_lbl)
+        banner_layout.addStretch()
+        self._doc_context_banner.hide()
+        layout.addWidget(self._doc_context_banner)
+
         # Content: welcome or conversation
         self._welcome  = WelcomePanel(self._ollama_status)
         self._welcome.prompt_selected.connect(self._on_prompt_chip)
@@ -1082,6 +1545,10 @@ class ChatScreen(QWidget):
         self._composer.record_start_requested.connect(self._on_record_start)
         self._composer.record_stop_requested.connect(self._on_record_stop)
         self._composer.record_cancel_requested.connect(self._on_record_cancel)
+        self._composer.attachment_requested.connect(self._on_attach_clicked)
+        self._composer.attachment_remove_requested.connect(self._on_remove_attachment)
+        self._composer.attachment_action_requested.connect(self._on_review_attachment)
+        self._composer.attachment_diagnostics_requested.connect(self._show_document_diagnostics)
         cw_l.addWidget(self._composer)
 
         note = QLabel(
@@ -1173,7 +1640,6 @@ class ChatScreen(QWidget):
 
     def _load_history_list(self):
         """Load all conversations from DB into the sidebar list."""
-        # Clear existing
         while self._conv_list_layout.count() > 1:
             item = self._conv_list_layout.takeAt(0)
             if item.widget():
@@ -1189,7 +1655,6 @@ class ChatScreen(QWidget):
         item.selected.connect(self._on_conv_selected)
         item.delete_req.connect(self._on_conv_delete)
         self._conv_items[conv_id] = item
-        # Insert before stretch
         self._conv_list_layout.insertWidget(
             self._conv_list_layout.count() - 1, item
         )
@@ -1206,19 +1671,29 @@ class ChatScreen(QWidget):
     def _on_new_chat(self):
         """Clear the view; actual DB record created on first message."""
         self._stop_tts()
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+        if self._rag_worker and self._rag_worker.isRunning():
+            self._rag_worker.cancel()
         self._current_conv_id = None
         self._convo.clear()
         self._convo.hide()
         self._welcome.show()
         self._conv_title_lbl.setText("PagePilot")
         self._highlight_conv(None)
+        self._composer.clear()
+        self._composer.clear_attachments()
+        self._update_context_banner()
+        self._reset_generation_state()
         self._composer.focus_input()
 
     def _on_conv_selected(self, conv_id: int):
         if conv_id == self._current_conv_id:
             return
         if self._worker and self._worker.isRunning():
-            return   # don't switch mid-generation
+            return
+        if self._rag_worker and self._rag_worker.isRunning():
+            return
 
         self._stop_tts()
         self._current_conv_id = conv_id
@@ -1237,10 +1712,68 @@ class ChatScreen(QWidget):
             if msg.role == "system":
                 continue
             self._convo.add_message(msg.role, msg.content, msg_id=msg.id)
+
+        # Restore attached documents for this conversation
+        self._composer.clear_attachments()
+        saved_doc_ids = self._db.get_conversation_documents(conv_id)
+        if saved_doc_ids:
+            doc_db = self._get_doc_db()
+            for did in saved_doc_ids:
+                d = doc_db.get_document(did)
+                if d and Path(d.file_path).exists():
+                    st_text = f"✓ {d.page_count}p" if d.status == "ready" else d.status.capitalize()
+                    self._composer.add_attachment(
+                        file_path=d.file_path,
+                        doc_type="pdf",
+                        status=d.status,
+                        status_text=st_text,
+                        doc_id=d.id,
+                        page_count=d.page_count,
+                    )
+        self._update_context_banner()
+
         QTimer.singleShot(50, self._convo._scroll_to_bottom)
 
+    def _update_context_banner(self):
+        attachments = self._composer.get_attachments()
+        pdf_attachments = [a for a in attachments if a.get("doc_type") == "pdf"]
+        if pdf_attachments:
+            items = []
+            for a in pdf_attachments:
+                p_cnt = a.get("page_count", 1)
+                st = a.get("status", "ready")
+                status_suffix = "" if st == "ready" else f" [{st}]"
+                items.append(f"📄 {a['filename']} ({p_cnt}p{status_suffix})")
+            self._doc_context_lbl.setText("Active Context: " + " · ".join(items))
+            self._doc_context_banner.show()
+        else:
+            self._doc_context_banner.hide()
+
+    def _show_document_diagnostics(self, doc_id: int):
+        from pagepilot.screens.document_diagnostics_dialog import DocumentDiagnosticsDialog
+        dlg = DocumentDiagnosticsDialog(
+            doc_id=doc_id,
+            doc_db=self._get_doc_db(),
+            ingestion_service=self._get_ingestion_service(),
+            parent=self,
+        )
+        dlg.reindexed.connect(self._on_document_reindexed)
+        dlg.exec()
+
+    def _on_document_reindexed(self, doc_id: int):
+        doc = self._get_doc_db().get_document(doc_id)
+        if doc:
+            st_text = f"✓ {doc.page_count}p" if doc.status == "ready" else doc.status.capitalize()
+            self._composer.update_attachment(
+                file_path=doc.file_path,
+                status=doc.status,
+                status_text=st_text,
+                doc_id=doc.id,
+                page_count=doc.page_count,
+            )
+            self._update_context_banner()
+
     def _on_conv_delete(self, conv_id: int):
-        from PySide6.QtWidgets import QMessageBox
         reply = QMessageBox.question(
             self,
             "Delete Conversation",
@@ -1269,13 +1802,182 @@ class ChatScreen(QWidget):
         self._composer._input.setFocus()
 
     # ──────────────────────────────────────────────────────────────
-    # Slots — message sending
+    # Slots — attachment handling (PDF & Notes OCR)
+    # ──────────────────────────────────────────────────────────────
+
+    def _on_attach_clicked(self):
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Attach Document or Note Image",
+            "",
+            "Supported Files (*.pdf *.png *.jpg *.jpeg *.webp);;PDF Documents (*.pdf);;Images (*.png *.jpg *.jpeg *.webp);;All Files (*.*)",
+        )
+        if not file_paths:
+            return
+
+        for fpath in file_paths:
+            path_obj = Path(fpath)
+            if not path_obj.exists() or not path_obj.is_file():
+                self._show_attachment_error(f"File not found: {fpath}")
+                continue
+
+            try:
+                size_bytes = path_obj.stat().st_size
+            except Exception as exc:
+                self._show_attachment_error(f"Cannot access file '{path_obj.name}': {exc}")
+                continue
+
+            if size_bytes == 0:
+                self._show_attachment_error(f"Cannot attach empty file: {path_obj.name}")
+                continue
+
+            ext = path_obj.suffix.lower()
+            if ext not in {".pdf", ".png", ".jpg", ".jpeg", ".webp"}:
+                self._show_attachment_error(
+                    f"Unsupported file format '{ext}'. Supported formats: PDF, PNG, JPG, JPEG, WebP."
+                )
+                continue
+
+            size_mb = size_bytes / (1024 * 1024)
+            if ext == ".pdf" and size_mb > 100:
+                self._show_attachment_error(f"PDF exceeds 100 MB limit: {path_obj.name} ({size_mb:.1f} MB)")
+                continue
+            elif ext != ".pdf" and size_mb > 50:
+                self._show_attachment_error(f"Image exceeds 50 MB limit: {path_obj.name} ({size_mb:.1f} MB)")
+                continue
+
+            if self._composer.has_attachment(fpath):
+                self._show_attachment_error(f"File '{path_obj.name}' is already attached.")
+                continue
+
+            if ext == ".pdf":
+                self._composer.add_attachment(
+                    file_path=fpath,
+                    doc_type="pdf",
+                    status="ingesting",
+                    status_text="Ingesting PDF…",
+                )
+                worker = _AttachmentIngestionWorker(self._get_ingestion_service(), fpath, parent=self)
+                worker.completed.connect(self._on_pdf_ingestion_completed)
+                worker.failed.connect(self._on_pdf_ingestion_failed)
+                self._attachment_workers.append(worker)
+                worker.start()
+            else:
+                self._composer.add_attachment(
+                    file_path=fpath,
+                    doc_type="image",
+                    status="pending_review",
+                    status_text="Importing…",
+                )
+                try:
+                    ocr_svc = self._get_ocr_service()
+                    doc = ocr_svc.import_image_note(fpath)
+                    self._composer.update_attachment(
+                        file_path=fpath,
+                        status="pending_review",
+                        status_text="Pending Review",
+                        doc_id=doc.id,
+                        page_count=1,
+                    )
+                except Exception as exc:
+                    self._composer.update_attachment(
+                        file_path=fpath,
+                        status="error",
+                        status_text="Import failed",
+                    )
+                    self._show_attachment_error(f"Failed to import note image '{path_obj.name}': {exc}")
+
+    def _on_pdf_ingestion_completed(self, data: dict):
+        fpath = data["file_path"]
+        doc_id = data["doc_id"]
+        page_count = data["page_count"]
+        self._composer.update_attachment(
+            file_path=fpath,
+            status="ready",
+            status_text=f"✓ Ready ({page_count}p)",
+            doc_id=doc_id,
+            page_count=page_count,
+        )
+        self._update_context_banner()
+        if self._current_conv_id is not None:
+            cur_att = self._composer.get_attachments()
+            doc_ids = [a["doc_id"] for a in cur_att if a.get("doc_id")]
+            self._db.set_conversation_documents(self._current_conv_id, doc_ids)
+
+    def _on_pdf_ingestion_failed(self, fpath: str, err: str):
+        self._composer.update_attachment(
+            file_path=fpath,
+            status="error",
+            status_text="Ingestion failed",
+        )
+        self._update_context_banner()
+        self._show_attachment_error(f"Failed to ingest PDF '{Path(fpath).name}': {err}")
+
+    def _on_remove_attachment(self, fpath: str):
+        self._update_context_banner()
+        if self._current_conv_id is not None:
+            cur_att = self._composer.get_attachments()
+            doc_ids = [a["doc_id"] for a in cur_att if a.get("doc_id")]
+            self._db.set_conversation_documents(self._current_conv_id, doc_ids)
+
+    def _on_review_attachment(self, fpath: str):
+        attachments = self._composer.get_attachments()
+        target = next((a for a in attachments if os.path.normcase(os.path.abspath(a["file_path"])) == os.path.normcase(os.path.abspath(fpath))), None)
+        if not target or not target.get("doc_id"):
+            self._show_attachment_error("Image metadata not found for review.")
+            return
+
+        dialog = OCRReviewDialog(
+            image_path=fpath,
+            document_id=target["doc_id"],
+            page_number=1,
+            ocr_service=self._get_ocr_service(),
+            parent=self,
+        )
+        if dialog.exec():
+            # Promoted and approved
+            self._composer.update_attachment(
+                file_path=fpath,
+                status="ready",
+                status_text="✓ Approved & Indexed",
+                doc_id=target["doc_id"],
+            )
+            self._update_context_banner()
+            if self._current_conv_id is not None:
+                cur_att = self._composer.get_attachments()
+                doc_ids = [a["doc_id"] for a in cur_att if a.get("doc_id")]
+                self._db.set_conversation_documents(self._current_conv_id, doc_ids)
+
+    def _show_attachment_error(self, message: str):
+        QMessageBox.warning(self, "PagePilot — Attachment", message)
+
+    # ──────────────────────────────────────────────────────────────
+    # Slots — message sending & RAG / Ollama inference
     # ──────────────────────────────────────────────────────────────
 
     def _on_send(self, text: str):
         if not text.strip():
             return
         if self._worker and self._worker.isRunning():
+            return
+        if self._rag_worker and self._rag_worker.isRunning():
+            return
+
+        attachments = self._composer.get_attachments()
+
+        # Check if any attachment is still ingesting
+        ingesting = [a for a in attachments if a.get("status") == "ingesting"]
+        if ingesting:
+            self._show_attachment_error(f"Please wait for '{ingesting[0]['filename']}' to finish ingesting before sending.")
+            return
+
+        # Check if any image note is unapproved (anti-hallucination guard)
+        pending_notes = [a for a in attachments if a.get("doc_type") == "image" and a.get("status") == "pending_review"]
+        if pending_notes:
+            self._show_attachment_error(
+                f"Note image '{pending_notes[0]['filename']}' is pending OCR review.\n"
+                f"Click '🔍 Review' on the attachment chip to verify and approve it before using it in chat."
+            )
             return
 
         self._stop_tts()
@@ -1301,12 +2003,57 @@ class ChatScreen(QWidget):
         )
         self._pending_msg_id = asst_msg.id
 
-        self._start_inference(text)
+        # Determine if we have attached documents ready for RAG grounding
+        ready_doc_ids = [a["doc_id"] for a in attachments if a.get("doc_id") and a.get("status") in ("ready", "approved")]
+
+        if ready_doc_ids:
+            self._db.set_conversation_documents(self._current_conv_id, ready_doc_ids)
+            self._start_rag_inference(text, ready_doc_ids)
+        else:
+            self._start_inference(text)
+
+    def _start_rag_inference(self, text: str, doc_ids: list[int]):
+        """Run grounded RAG inference on attached document(s)."""
+        rag_svc = self._get_rag_service()
+        stream_widget = self._convo.add_message("assistant", "")
+        stream_widget.set_streaming(True)
+        self._current_stream_widget = stream_widget
+
+        self._rag_worker = RAGWorker(
+            rag_service=rag_svc,
+            question=text,
+            document_ids=doc_ids,
+            is_verified_mode=True,
+            parent=self,
+        )
+        self._rag_worker.token_received.connect(self._on_token)
+        self._rag_worker.citations_ready.connect(self._on_rag_citations)
+        self._rag_worker.finished.connect(self._on_rag_generation_done)
+        self._rag_worker.error_occurred.connect(self._on_generation_error)
+        self._rag_worker.cancelled.connect(self._on_generation_cancelled)
+        self._rag_worker.start()
+
+        self._composer.set_generating(True)
+
+    def _on_rag_citations(self, citations: list):
+        if self._current_stream_widget and citations:
+            self._current_stream_widget.set_citations(citations)
+
+    def _on_rag_generation_done(self, full_text: str, citations: list):
+        if self._current_stream_widget:
+            self._current_stream_widget.set_streaming(False)
+            if citations:
+                self._current_stream_widget.set_citations(citations)
+            if PIPER_AUTO_SPEAK:
+                self._on_speak_requested(self._current_stream_widget, full_text)
+        if self._pending_msg_id is not None:
+            self._db.update_message(self._pending_msg_id, full_text, "complete")
+        self._reset_generation_state()
+        QTimer.singleShot(20, lambda: self._convo._scroll_to_bottom(force=True))
 
     def _start_inference(self, _trigger_text: str):
-        """Build context and launch the inference worker."""
+        """Build context and launch the standard Ollama inference worker."""
         if not self._ollama_status.ready:
-            # Re-check first
             self._check_ollama_status()
             self._show_error(
                 "Ollama is not ready.\n\n"
@@ -1317,7 +2064,6 @@ class ChatScreen(QWidget):
         # Build message list (system + recent history)
         history = self._db.get_messages(self._current_conv_id)
         context: list[ChatMessage] = [ChatMessage("system", SYSTEM_PROMPT)]
-        # Keep last MAX_HISTORY_MESSAGES (excluding pending assistant)
         relevant = [m for m in history if not (m.role == "assistant" and m.status == "pending")]
         for msg in relevant[-MAX_HISTORY_MESSAGES:]:
             context.append(ChatMessage(msg.role, msg.content))
@@ -1340,8 +2086,7 @@ class ChatScreen(QWidget):
     def _on_token(self, token: str):
         if self._current_stream_widget:
             self._current_stream_widget.append_token(token)
-            # Auto-scroll
-            QTimer.singleShot(5, self._convo._scroll_to_bottom)
+            self._convo._scroll_to_bottom(force=False)
 
     def _on_generation_done(self, full_text: str):
         if self._current_stream_widget:
@@ -1351,6 +2096,7 @@ class ChatScreen(QWidget):
         if self._pending_msg_id is not None:
             self._db.update_message(self._pending_msg_id, full_text, "complete")
         self._reset_generation_state()
+        QTimer.singleShot(20, lambda: self._convo._scroll_to_bottom(force=True))
 
     def _on_generation_error(self, error_msg: str):
         if self._current_stream_widget:
@@ -1377,22 +2123,23 @@ class ChatScreen(QWidget):
         self._pending_msg_id = None
         self._composer.set_generating(False)
         self._worker = None
+        self._rag_worker = None
 
     def _on_stop(self):
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
+        if self._rag_worker and self._rag_worker.isRunning():
+            self._rag_worker.cancel()
 
     def _on_regenerate(self, _widget_index: int):
-        if self._worker and self._worker.isRunning():
+        if (self._worker and self._worker.isRunning()) or (self._rag_worker and self._rag_worker.isRunning()):
             return
         if self._current_conv_id is None:
             return
 
-        # Remove last assistant message from DB and UI
         self._db.delete_last_assistant_message(self._current_conv_id)
         self._convo.remove_last_assistant()
 
-        # Get last user message content
         messages = self._db.get_messages(self._current_conv_id)
         last_user = next(
             (m for m in reversed(messages) if m.role == "user"), None
@@ -1400,12 +2147,17 @@ class ChatScreen(QWidget):
         if not last_user:
             return
 
-        # Save new pending assistant slot
         asst_msg = self._db.add_message(
             self._current_conv_id, "assistant", "", status="pending"
         )
         self._pending_msg_id = asst_msg.id
-        self._start_inference(last_user.content)
+
+        attachments = self._composer.get_attachments()
+        ready_doc_ids = [a["doc_id"] for a in attachments if a.get("doc_id") and a.get("status") in ("ready", "approved")]
+        if ready_doc_ids:
+            self._start_rag_inference(last_user.content, ready_doc_ids)
+        else:
+            self._start_inference(last_user.content)
 
     def _show_error(self, message: str):
         w = self._convo.add_message("assistant", "")
@@ -1417,13 +2169,30 @@ class ChatScreen(QWidget):
 
     def _on_record_start(self):
         self._stop_tts()
+        if self._is_recording_active:
+            return
+
         if not is_whisper_installed(WHISPER_MODEL):
             self._composer.set_recording_state(
                 "error", f"Whisper model 'ggml-{WHISPER_MODEL}' not found. Download in Settings."
             )
-            QTimer.singleShot(4000, lambda: self._composer.set_recording_state("idle"))
             return
 
+        # Pre-flight check for microphone devices
+        devices = list_input_devices()
+        if not devices:
+            self._composer.set_recording_state(
+                "error", "No microphone detected. Check Windows sound settings."
+            )
+            return
+
+        # Terminate any previously running recorder
+        if self._recorder and self._recorder.isRunning():
+            self._recorder.stop()
+            self._recorder.wait(300)
+        self._recorder = None
+
+        self._is_recording_active = True
         self._recorder = RecorderThread(parent=self)
         self._recorder.state_changed.connect(self._on_recorder_state)
         self._recorder.finished_path.connect(self._on_recorder_path)
@@ -1433,29 +2202,44 @@ class ChatScreen(QWidget):
 
     def _on_record_stop(self):
         if self._recorder and self._recorder.isRunning():
+            self._composer.set_recording_state("processing", "Saving audio…")
             self._recorder.stop()
-            self._composer.set_recording_state("processing")
 
     def _on_record_cancel(self):
+        self._is_recording_active = False
         if self._recorder and self._recorder.isRunning():
             self._recorder.cancel()
         self._composer.set_recording_state("idle")
 
     def _on_recorder_state(self, state: str):
         if state == "cancelled":
+            self._is_recording_active = False
             self._composer.set_recording_state("idle")
+        elif state == "recording":
+            self._composer.set_recording_state("recording")
+        elif state == "stopping":
+            self._composer.set_recording_state("processing", "Saving audio…")
 
     def _on_recorder_error(self, err: str):
+        self._is_recording_active = False
         self._composer.set_recording_state("error", err)
-        QTimer.singleShot(4000, lambda: self._composer.set_recording_state("idle"))
 
     def _on_recorder_path(self, wav_path: str):
-        self._composer.set_recording_state("processing")
+        self._is_recording_active = False
+        self._composer.set_recording_state("transcribing", "Transcribing with Whisper…")
+
+        if self._transcriber and self._transcriber.isRunning():
+            self._transcriber.wait(300)
+        self._transcriber = None
+
         self._transcriber = TranscriptionThread(
             wav_path=wav_path,
             model_name=WHISPER_MODEL,
             language=WHISPER_LANGUAGE,
             parent=self,
+        )
+        self._transcriber.progress.connect(
+            lambda msg: self._composer.set_recording_state("transcribing", msg)
         )
         self._transcriber.transcription_done.connect(
             lambda text, path=wav_path: self._on_transcription_done(text, path)
@@ -1472,8 +2256,8 @@ class ChatScreen(QWidget):
         except Exception:
             pass
         self._composer.set_recording_state("idle")
-        if text:
-            self._composer.insert_text(text)
+        if text and text.strip():
+            self._composer.insert_text(text.strip())
 
     def _on_transcription_error(self, err: str, wav_path: str):
         try:
@@ -1482,7 +2266,6 @@ class ChatScreen(QWidget):
         except Exception:
             pass
         self._composer.set_recording_state("error", err)
-        QTimer.singleShot(4000, lambda: self._composer.set_recording_state("idle"))
 
     # ──────────────────────────────────────────────────────────────
     # Slots — text-to-speech (Stage 3)
@@ -1528,6 +2311,22 @@ class ChatScreen(QWidget):
     def _on_tts_error(self, err: str):
         self._stop_tts()
         self._show_error(f"Speech playback error: {err}")
+
+    def closeEvent(self, event):
+        """Safely cancel background recording and threads on screen close."""
+        self._stop_tts()
+        if self._recorder and self._recorder.isRunning():
+            self._recorder.cancel()
+            self._recorder.wait(300)
+        if self._transcriber and self._transcriber.isRunning():
+            self._transcriber.wait(300)
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self._worker.wait(300)
+        if self._rag_worker and self._rag_worker.isRunning():
+            self._rag_worker.cancel()
+            self._rag_worker.wait(300)
+        super().closeEvent(event)
 
     # ──────────────────────────────────────────────────────────────
     # Public API (called by MainWindow / Sidebar)

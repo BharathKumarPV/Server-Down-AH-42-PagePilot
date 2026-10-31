@@ -11,7 +11,7 @@ Coordinates:
 
 from __future__ import annotations
 
-from typing import Callable, Generator, List, Optional, Tuple
+from typing import Callable, Generator, List, Optional, Tuple, TYPE_CHECKING
 
 from PySide6.QtCore import QThread, Signal
 
@@ -25,11 +25,24 @@ from pagepilot.ai.claim_models import (
     VerifiedAnswer,
 )
 from pagepilot.ai.claim_verifier import ClaimVerifier
-from pagepilot.ai.query_planner import QueryPlanner
+from pagepilot.ai.query_planner import (
+    INTENT_CODE_EXPLANATION,
+    INTENT_DOCUMENT_QUESTION,
+    INTENT_DOCUMENT_SUMMARY,
+    INTENT_GENERAL_CHAT,
+    INTENT_MULTI_DOCUMENT_COMPARISON,
+    INTENT_TARGETED_LOOKUP,
+    QueryPlanner,
+)
 from pagepilot.ai.prompts import (
+    CODE_EXPLANATION_SYSTEM_PROMPT,
     RAG_SYSTEM_PROMPT,
     STRUCTURED_CLAIM_SYSTEM_PROMPT,
+    SUMMARIZE_HIERARCHICAL_SYSTEM_PROMPT,
     SUMMARIZE_SYSTEM_PROMPT,
+    build_code_explanation_prompt,
+    build_hierarchical_summary_prompt,
+    build_multi_doc_summary_prompt,
     build_rag_user_prompt,
     build_structured_claim_prompt,
     build_summarize_doc_prompt,
@@ -39,7 +52,8 @@ from pagepilot.config import RETRIEVAL_TOP_K
 from pagepilot.db.database import DocumentDB
 from pagepilot.pdf.citation import build_citations
 from pagepilot.pdf.models import Chunk, Citation
-from pagepilot.retrieval.hybrid_retriever import HybridRetriever
+if TYPE_CHECKING:
+    from pagepilot.retrieval.hybrid_retriever import HybridRetriever
 
 
 class RAGService:
@@ -129,6 +143,181 @@ class RAGService:
         user_prompt = build_summarize_doc_prompt(doc.filename, selected_chunks)
         messages = [
             ChatMessage(role="system", content=SUMMARIZE_SYSTEM_PROMPT),
+            ChatMessage(role="user", content=user_prompt),
+        ]
+
+        stream = self.client.chat_stream(messages, cancel_flag=cancel_flag)
+        return stream, citations
+
+    def summarize_document_hierarchical(
+        self,
+        document_id: int,
+        page_range: Optional[tuple[int, int]] = None,
+        cancel_flag: list[bool] | None = None,
+    ) -> Tuple[Generator[str, None, None], list[Citation]]:
+        """
+        Produce a hierarchical, evidence-grounded summary of a single PDF document.
+        Handles large documents (e.g. 48 pages) section-by-section without context overflow.
+        """
+        doc = self.db.get_document(document_id)
+        if not doc:
+            raise ValueError(f"Document {document_id} not found.")
+
+        all_chunks = self.db.get_chunks_for_document(document_id)
+        if not all_chunks:
+            def no_text():
+                if doc.status == "scanned_ocr_required" or doc.scanned_pages_count > 0:
+                    yield (
+                        f"Document **{doc.filename}** contains {doc.scanned_pages_count} scanned pages.\n\n"
+                        "Real OCR processing and review are required before this document can be summarized."
+                    )
+                else:
+                    yield f"Document **{doc.filename}** contains no extractable text to summarize."
+            return no_text(), []
+
+        # Filter by page range if requested (e.g. "pages 20 to 30")
+        if page_range:
+            start_p, end_p = page_range
+            chunks = [c for c in all_chunks if start_p <= c.page_number <= end_p]
+            if not chunks:
+                def range_empty():
+                    yield (
+                        f"No extractable text found in pages {start_p} to {end_p} of **{doc.filename}** "
+                        f"(document has {doc.page_count} pages total)."
+                    )
+                return range_empty(), []
+        else:
+            chunks = all_chunks
+
+        # Group chunks into sections across page spans
+        pages_in_chunks = sorted(list({c.page_number for c in chunks}))
+        sections: list[dict] = []
+        section_size = 6
+
+        for i in range(0, len(pages_in_chunks), section_size):
+            p_slice = pages_in_chunks[i : i + section_size]
+            s_chunks = [c for c in chunks if c.page_number in p_slice]
+            p_label = f"pp. {p_slice[0]}–{p_slice[-1]}" if len(p_slice) > 1 else f"p. {p_slice[0]}"
+
+            sec_texts = []
+            for c in s_chunks:
+                heading = f"[{c.section_heading}] " if c.section_heading else ""
+                clean_t = c.text.strip()
+                if len(clean_t) > 300:
+                    clean_t = clean_t[:300] + "…"
+                sec_texts.append(f"{heading}{clean_t}")
+
+            section_content = "\n".join(sec_texts[:4])
+            sections.append({
+                "pages_label": p_label,
+                "text": section_content,
+                "chunks": s_chunks,
+            })
+
+        citations = build_citations(chunks)
+        user_prompt = build_hierarchical_summary_prompt(doc.filename, sections)
+        messages = [
+            ChatMessage(role="system", content=SUMMARIZE_HIERARCHICAL_SYSTEM_PROMPT),
+            ChatMessage(role="user", content=user_prompt),
+        ]
+
+        stream = self.client.chat_stream(messages, cancel_flag=cancel_flag)
+        return stream, citations
+
+    def summarize_multiple_documents(
+        self,
+        document_ids: list[int],
+        cancel_flag: list[bool] | None = None,
+    ) -> Tuple[Generator[str, None, None], list[Citation]]:
+        """
+        Summarize multiple selected documents with individual breakdowns and a cross-document overview.
+        """
+        doc_summaries: list[dict] = []
+        all_citations: list[Citation] = []
+
+        for did in document_ids:
+            doc = self.db.get_document(did)
+            if not doc:
+                continue
+            chunks = self.db.get_chunks_for_document(did)
+            if not chunks:
+                doc_summaries.append({
+                    "filename": doc.filename,
+                    "summary": f"[No extractable text; status: {doc.status}]",
+                })
+                continue
+
+            all_citations.extend(build_citations(chunks))
+
+            if len(chunks) > 8:
+                step = max(1, len(chunks) // 8)
+                sampled = [chunks[i] for i in range(0, len(chunks), step)][:8]
+            else:
+                sampled = chunks
+
+            doc_text = "\n".join(f"[p. {c.page_number}] {c.text[:250]}" for c in sampled)
+            doc_summaries.append({
+                "filename": doc.filename,
+                "summary": doc_text,
+            })
+
+        user_prompt = build_multi_doc_summary_prompt(doc_summaries)
+        messages = [
+            ChatMessage(role="system", content=SUMMARIZE_HIERARCHICAL_SYSTEM_PROMPT),
+            ChatMessage(role="user", content=user_prompt),
+        ]
+
+        seen = set()
+        dedup_cits: list[Citation] = []
+        for c in all_citations:
+            key = (c.document_id, c.page_number)
+            if key not in seen:
+                seen.add(key)
+                dedup_cits.append(c)
+
+        stream = self.client.chat_stream(messages, cancel_flag=cancel_flag)
+        return stream, dedup_cits
+
+    def explain_code(
+        self,
+        question: str,
+        document_ids: list[int] | None = None,
+        cancel_flag: list[bool] | None = None,
+    ) -> Tuple[Generator[str, None, None], list[Citation]]:
+        """
+        Extract and explain code blocks and implementation passages from documents.
+        """
+        planner = QueryPlanner(self.client)
+        cleaned_query = planner.clean_retrieval_query(question)
+
+        # Retrieve relevant passages containing code patterns or programming terms
+        retrieval_res = self.retriever.retrieve(
+            query=f"code implementation function class script {cleaned_query}".strip(),
+            document_ids=document_ids,
+            top_k=8,
+        )
+
+        code_chunks = retrieval_res.chunks
+        if not code_chunks:
+            retrieval_res = self.retriever.retrieve(
+                query=cleaned_query or question,
+                document_ids=document_ids,
+                top_k=8,
+            )
+            code_chunks = retrieval_res.chunks
+
+        if not code_chunks:
+            def no_code_stream():
+                yield (
+                    "Based on the selected documents, I could not find code or implementation "
+                    "passages to explain."
+                )
+            return no_code_stream(), []
+
+        citations = build_citations(code_chunks)
+        user_prompt = build_code_explanation_prompt(question, code_chunks)
+        messages = [
+            ChatMessage(role="system", content=CODE_EXPLANATION_SYSTEM_PROMPT),
             ChatMessage(role="user", content=user_prompt),
         ]
 
@@ -279,7 +468,43 @@ class RAGWorker(QThread):
 
     def run(self):
         try:
-            if self._is_verified_mode and not self._is_summary:
+            planner = QueryPlanner()
+            intent = planner.classify_intent(self._question, has_documents=bool(self._doc_ids))
+            page_range = planner.extract_page_range(self._question)
+
+            if self._is_summary or intent == INTENT_DOCUMENT_SUMMARY:
+                if self._doc_ids and len(self._doc_ids) > 1:
+                    stream, citations = self._service.summarize_multiple_documents(
+                        self._doc_ids,
+                        cancel_flag=self._cancel,
+                    )
+                elif self._summary_doc_id is not None:
+                    stream, citations = self._service.summarize_document_hierarchical(
+                        self._summary_doc_id,
+                        page_range=page_range,
+                        cancel_flag=self._cancel,
+                    )
+                elif self._doc_ids and len(self._doc_ids) == 1:
+                    stream, citations = self._service.summarize_document_hierarchical(
+                        self._doc_ids[0],
+                        page_range=page_range,
+                        cancel_flag=self._cancel,
+                    )
+                else:
+                    stream, citations = self._service.answer_question(
+                        self._question,
+                        document_ids=self._doc_ids,
+                        cancel_flag=self._cancel,
+                    )
+
+            elif intent == INTENT_CODE_EXPLANATION:
+                stream, citations = self._service.explain_code(
+                    self._question,
+                    document_ids=self._doc_ids,
+                    cancel_flag=self._cancel,
+                )
+
+            elif self._is_verified_mode and not self._is_summary:
                 # Stage 6A: Verified Multi-Document Answer Generation
                 verified_ans = self._service.answer_question_verified(
                     self._question,
@@ -319,11 +544,6 @@ class RAGWorker(QThread):
                 self.finished.emit(rendered_text, citations_list)
                 return
 
-            if self._is_summary and self._summary_doc_id is not None:
-                stream, citations = self._service.summarize_document(
-                    self._summary_doc_id,
-                    cancel_flag=self._cancel,
-                )
             else:
                 stream, citations = self._service.answer_question(
                     self._question,
@@ -331,6 +551,7 @@ class RAGWorker(QThread):
                     cancel_flag=self._cancel,
                 )
 
+            # Common streaming handler for summary, code_explanation, and standard Q&A
             self._citations = citations
             self.citations_ready.emit(citations)
 
